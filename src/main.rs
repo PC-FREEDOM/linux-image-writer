@@ -288,27 +288,32 @@ fn run_select(block_path: String) -> zbus::Result<()> {
 // unverified block-path reference: a fresh snapshot, then `core::select()`.
 // The messages are the ones this function printed before.
 fn attempt_select(block_path: &str) -> core::SelectionState {
-    use orchestration::candidates::{SelectTargetError, TargetRef, select_target};
+    use orchestration::candidates::{TargetRef, select_target};
 
-    match select_target(&TargetRef::from_block_path(block_path)) {
+    match select_target(
+        &orchestration::platform::LinuxPlatform,
+        &TargetRef::from_block_path(block_path),
+    ) {
         Ok(state) => state,
         Err(error) => {
-            match error {
-                SelectTargetError::NotSelectable(_) => eprintln!("select rejected: NotSelectable"),
-                SelectTargetError::NotFound => {
-                    eprintln!("select failed: no such target: {block_path}")
-                }
-                SelectTargetError::SnapshotUnavailable(reason) => {
-                    eprintln!("select failed: {reason}")
-                }
-                // Only a reference from the candidate list can report this;
-                // a block-path reference has nothing to compare with.
-                SelectTargetError::CandidateChanged(change) => {
-                    eprintln!("select rejected: {change:?}")
-                }
-            }
+            print_select_error(&error, block_path);
             core::SelectionState::NoSelection
         }
+    }
+}
+
+// The messages `attempt_select` has always printed when selection fails
+// (also used by `write-test`, which selects through `orchestration`).
+fn print_select_error(error: &orchestration::candidates::SelectTargetError, block_path: &str) {
+    use orchestration::candidates::SelectTargetError;
+
+    match error {
+        SelectTargetError::NotSelectable(_) => eprintln!("select rejected: NotSelectable"),
+        SelectTargetError::NotFound => eprintln!("select failed: no such target: {block_path}"),
+        SelectTargetError::SnapshotUnavailable(reason) => eprintln!("select failed: {reason}"),
+        // Only a reference from the candidate list can report this; a
+        // block-path reference has nothing to compare with.
+        SelectTargetError::CandidateChanged(change) => eprintln!("select rejected: {change:?}"),
     }
 }
 
@@ -844,14 +849,16 @@ fn pause_before_verify_for_test() -> bool {
 // string accepted with no safety checks. `image_path` is opened by
 // `image_source::open_image()` exactly once; the source built from that
 // open file (a `FileImageSource` for a raw image, a `CompressedImageSource`
-// for a validated gzip or xz image) becomes the `SelectedImage` (`selected_image`
-// below), held by this one variable, unchanged, from that point until it is
-// moved into `AuthorizedExecution::bind()` -- it is never re-opened, never
-// reconstructed, and no second source/`SelectedImage` is ever created for
-// the same invocation.
+// for a validated gzip or xz image) becomes the `SelectedImage`, held
+// inside `orchestration::operation`'s values, unchanged, from that point
+// until `operation.bind()` moves it into `AuthorizedExecution::bind()` -- it
+// is never re-opened, never reconstructed, and no second
+// source/`SelectedImage` is ever created for the same invocation.
 //
-// Still a linear CLI PoC, not a Controller: every step happens in this one
-// function, exactly like `run_prepare_test`. If OpenDevice needs polkit
+// Still a linear CLI PoC, not a Controller: the first half (target, image,
+// confirmation) runs step by step through `orchestration::operation`, and
+// every other step happens in this one function, exactly like
+// `run_prepare_test`. If OpenDevice needs polkit
 // authentication, this program does nothing but wait for the reply; it
 // never falls back to sudo or any other bypass.
 //
@@ -873,28 +880,30 @@ fn run_write_test(
     verify_mode: core::VerifyMode,
     test_pause_before_verify: bool,
 ) -> zbus::Result<WriteTestExit> {
-    let mut state = attempt_select(&block_path);
+    // The first half -- target, image, confirmation -- runs through
+    // `orchestration::operation`, one step at a time; everything this
+    // function prints or reads in between is unchanged. The CLI argument is
+    // an unverified block-path reference.
+    let platform = orchestration::platform::LinuxPlatform;
+    let target = orchestration::candidates::TargetRef::from_block_path(block_path.as_str());
 
-    if let core::SelectionState::Selected { baseline, .. } = &state {
-        let outcome = collect_device_snapshot(&baseline.block_path);
-        state = core::revalidate(state, outcome);
-    }
-
-    print_selection_state(&state);
-
-    if !core::is_ready_to_open(&state) {
-        println!("\nwrite-test: Selection invalid -- stopping before the Write Gate.");
-        return Ok(WriteTestExit::Completed);
-    }
-
-    // What a compressed image's Preflight needs from the target, read now:
-    // `state` itself is re-verified after Preflight (below), so no borrow of
-    // it is held across the image preparation.
-    let (target_capacity, target_block_path) = match &state {
-        core::SelectionState::Selected { baseline, .. } => {
-            (baseline.size, baseline.block_path.clone())
+    let selected_target = match orchestration::operation::select_write_target(&platform, &target) {
+        Ok(selected_target) => {
+            print_selection_state(selected_target.state());
+            selected_target
         }
-        _ => unreachable!("is_ready_to_open just confirmed Selected"),
+        Err(not_ready) => {
+            let state = match not_ready {
+                orchestration::operation::TargetNotReady::Select(error) => {
+                    print_select_error(&error, &block_path);
+                    core::SelectionState::NoSelection
+                }
+                orchestration::operation::TargetNotReady::NotReady(state) => state,
+            };
+            print_selection_state(&state);
+            println!("\nwrite-test: Selection invalid -- stopping before the Write Gate.");
+            return Ok(WriteTestExit::Completed);
+        }
     };
 
     // Cancel wiring (Ctrl+C -> CancelHandle): one shared handle, created and
@@ -920,142 +929,119 @@ fn run_write_test(
         return Ok(WriteTestExit::Completed);
     }
 
-    // The one and only place `image_path` is opened this invocation:
-    // `open_image` opens it once, classifies it by content, and (for a raw
-    // image) builds the `FileImageSource` from that same open file.
-    // `selected_image` is what travels, as a single variable, all the way
-    // to `AuthorizedExecution::bind()` below -- `selection()` (a cheap Copy)
-    // is all that gets threaded through the Gate calls in between.
+    // The one and only place `image_path` is opened this invocation (inside
+    // `prepare_image`, see there). A gzip or xz image is validated end to
+    // end (Preflight) before anything else, with the decoded size bounded by
+    // the target's capacity, so the confirmation below shows the exact image
+    // size and an image that cannot be written is refused before the target
+    // is opened; the target is then re-verified before the confirmation.
     //
-    // Every refusal here happens before the target is opened. A refusal or
-    // failure returns `Completed`, exactly like the pre-existing image-open
-    // failure path; a cancellation during a compressed image's Preflight returns
-    // `Cancelled` (exit 130), like every other cancellation.
-    let source: Box<dyn image_source::ImageSource> = match image_source::open_image(&image_path) {
-        Ok(image_source::OpenedImage::Raw(source)) => Box::new(source),
-        Ok(image_source::OpenedImage::Compressed(compressed)) => {
-            // gzip or xz, alike: validated end to end (Preflight) before anything else,
-            // with the decoded size bounded by the target's capacity, so the
-            // confirmation below shows the exact image size and an image
-            // that cannot be written is refused before the target is opened.
+    // A refusal or failure returns `Completed`, exactly like the
+    // pre-existing image-open failure path; a cancellation during a
+    // compressed image's Preflight returns `Cancelled` (exit 130), like every
+    // other cancellation.
+    let image = match selected_target.prepare_image(
+        &platform,
+        &image_path,
+        verify_mode,
+        &cancel,
+        |format| {
             println!(
                 "write-test: detected format: {} (compressed image); validating it before writing (nothing is written yet)",
-                compressed.format().name()
-            );
-            let prepared = orchestration::image::prepare_compressed_image(
-                compressed,
-                verify_mode,
-                target_capacity,
-                || cancel.is_requested(),
-                |progress| println!("write-test: {}", format_preflight_progress(&progress)),
-            );
-            let source = match prepared {
-                Ok(source) => source,
-                Err(CompressedImageRejection::Preflight(
-                    image_source::compressed::PreflightError::Cancelled,
-                )) => {
-                    for line in format_cancelled_before_confirmation() {
-                        println!("write-test: {line}");
-                    }
-                    return Ok(WriteTestExit::Cancelled);
-                }
-                Err(rejection) => {
-                    for line in format_compressed_image_rejected(&rejection) {
-                        println!("write-test: {line}");
-                    }
-                    return Ok(WriteTestExit::Completed);
-                }
-            };
-
-            // Validation can take a long time: re-verify the target (fresh
-            // snapshot; Identity / Instance / Safety) before continuing to
-            // the confirmation. The write-time re-check before OpenDevice
-            // still runs later, unchanged.
-            state = core::revalidate(state, collect_device_snapshot(&target_block_path));
-            if !core::is_ready_to_open(&state) {
-                println!("write-test: the target changed while the image was being validated:");
-                print_selection_state(&state);
-                println!("write-test: stopping before confirmation; nothing was written.");
-                return Ok(WriteTestExit::Completed);
+                format.name()
+            )
+        },
+        |progress| println!("write-test: {}", format_preflight_progress(&progress)),
+    ) {
+        Ok(image) => image,
+        Err(orchestration::operation::PrepareImageError::CompressedImage(
+            CompressedImageRejection::Preflight(image_source::compressed::PreflightError::Cancelled),
+        )) => {
+            for line in format_cancelled_before_confirmation() {
+                println!("write-test: {line}");
             }
-
-            Box::new(source)
+            return Ok(WriteTestExit::Cancelled);
         }
-        Err(
+        Err(orchestration::operation::PrepareImageError::CompressedImage(rejection)) => {
+            for line in format_compressed_image_rejected(&rejection) {
+                println!("write-test: {line}");
+            }
+            return Ok(WriteTestExit::Completed);
+        }
+        Err(orchestration::operation::PrepareImageError::TargetChanged(state)) => {
+            println!("write-test: the target changed while the image was being validated:");
+            print_selection_state(&state);
+            println!("write-test: stopping before confirmation; nothing was written.");
+            return Ok(WriteTestExit::Completed);
+        }
+        Err(orchestration::operation::PrepareImageError::Image(
             error @ (image_source::ImageSourceError::UnsupportedFormat(_)
             | image_source::ImageSourceError::ExtensionMismatch { .. }),
-        ) => {
+        )) => {
             for line in format_image_format_rejected(&error) {
                 println!("write-test: {line}");
             }
             return Ok(WriteTestExit::Completed);
         }
-        Err(error) => {
+        Err(orchestration::operation::PrepareImageError::Image(error)) => {
             println!("write-test: failed to open image {image_path}: {error:?}");
             return Ok(WriteTestExit::Completed);
         }
     };
-    let selected_image = image_source::SelectedImage::new(source);
-
-    let core::SelectionState::Selected {
-        baseline,
-        baseline_assessment,
-        ..
-    } = &state
-    else {
-        unreachable!("is_ready_to_open confirmed Selected");
-    };
 
     println!(
         "\nwrite-test: image selected from {image_path} (image_size={} bytes)",
-        selected_image.logical_size()
+        image.logical_size()
     );
 
-    // Ctrl+C may have arrived while the image was being opened. Nothing on
-    // the target side has been opened at this point (OpenDevice only happens
-    // after confirmation), so stopping here is unconditionally safe.
-    if cancel.is_requested() {
-        for line in format_cancelled_before_confirmation() {
-            println!("write-test: {line}");
+    // Ctrl+C may have arrived while the image was being opened; checked by
+    // `request_confirmation` before anything is shown.
+    let pending = match image.request_confirmation(&cancel) {
+        Ok(pending) => pending,
+        Err(orchestration::operation::CancelledBeforeConfirmation) => {
+            for line in format_cancelled_before_confirmation() {
+                println!("write-test: {line}");
+            }
+            return Ok(WriteTestExit::Cancelled);
         }
-        return Ok(WriteTestExit::Cancelled);
-    }
+    };
 
     // ---- Pre-write Safety Summary / Destructive Warning / Human Confirmation ----
-    // Reuses `baseline`/`baseline_assessment` from the same `state` that
-    // `attempt_select`/`revalidate` already fetched and re-verified above --
-    // no new device probe, no extra D-Bus call added just for this summary.
+    // Shows the same re-verified selection and image the confirmation will
+    // be bound to -- no new device probe, no extra D-Bus call added just for
+    // this summary.
+    let request = pending.request();
     println!("\nwrite-test: Pre-write Safety Summary");
     println!("Target:");
-    println!("  Device:      {}", baseline.device);
-    println!("  Model:       {} {}", baseline.vendor, baseline.model);
-    println!("  Serial:      {}", baseline.serial);
-    println!("  Size:        {}", format_size(baseline.size));
-    println!("  Bus:         {}", baseline.connection_bus);
-    println!("  Removable:   {}", baseline.removable);
-    if baseline.mount_points.is_empty() {
+    println!("  Device:      {}", request.target.device);
+    println!(
+        "  Model:       {} {}",
+        request.target.vendor, request.target.model
+    );
+    println!("  Serial:      {}", request.target.serial);
+    println!("  Size:        {}", format_size(request.target.size));
+    println!("  Bus:         {}", request.target.connection_bus);
+    println!("  Removable:   {}", request.target.removable);
+    if request.target.mount_points.is_empty() {
         println!("  Mounts:      none");
     } else {
-        println!("  Mounts:      {}", baseline.mount_points.join(", "));
+        println!("  Mounts:      {}", request.target.mount_points.join(", "));
     }
-    println!("  Risk:        {:?}", baseline_assessment.risk_level);
-    println!("  Writable:    {}", baseline_assessment.writable);
-    println!("  Reasons:     {:?}", baseline_assessment.reasons);
-    println!("  Block path:  {}", baseline.block_path);
-    println!("  DiskSeq:     {:?}", baseline.diskseq);
+    println!("  Risk:        {:?}", request.assessment.risk_level);
+    println!("  Writable:    {}", request.assessment.writable);
+    println!("  Reasons:     {:?}", request.assessment.reasons);
+    println!("  Block path:  {}", request.block_path);
+    println!("  DiskSeq:     {:?}", request.diskseq);
     println!("Image:");
     println!("  Path:        {image_path}");
-    println!(
-        "  Size:        {}",
-        format_size(selected_image.logical_size())
-    );
-    println!("Verification mode: {verify_mode:?}");
+    println!("  Size:        {}", format_size(request.image_size));
+    println!("Verification mode: {:?}", request.verify_mode);
     println!();
     println!("WARNING: Writing will overwrite the target device.");
     println!("ALL EXISTING DATA ON THIS DEVICE MAY BE DESTROYED. This cannot be undone.");
     println!();
 
-    let expected_device = baseline.device.clone();
+    let expected_device = request.expected_text.to_string();
     println!("Type the target device name exactly to continue: {expected_device}");
     print!("> ");
     let _ = std::io::stdout().flush();
@@ -1072,12 +1058,46 @@ fn run_write_test(
         Err(error) => PromptInput::Error(error),
     };
 
-    let confirmed = match prompt_input {
-        PromptInput::Line(input) => orchestration::confirmation_matches(&input, &expected_device),
-        PromptInput::Eof => false, // EOF (e.g. stdin closed or redirected from an empty source): treat as "no answer given", never as an implicit yes.
+    // `pending.confirm()` compares the typed line with the target's `/dev`
+    // node (`orchestration::confirmation_matches`) and only then freezes
+    // what was confirmed -- target, image, generation and `verify_mode`, the
+    // CLI's own choice (see the `write-test` dispatch in `main()`) -- into a
+    // `WriteIntent` and `ConfirmationToken`, which stay inside `operation`.
+    // `SyncSucceeded` (produced far below, after a successful write+sync)
+    // carries this exact `verify_mode` forward unchanged, which is what
+    // `SyncSucceeded::begin_verify()` branches on to decide None/Quick/Full.
+    let operation = match prompt_input {
+        PromptInput::Line(input) => match pending.confirm(&input) {
+            Ok(operation) => {
+                println!("write-test: confirmation accepted for {expected_device}");
+                operation
+            }
+            Err(orchestration::operation::ConfirmError::Mismatch) => {
+                println!(
+                    "write-test: confirmation failed; no device was opened and nothing was written"
+                );
+                return Ok(WriteTestExit::Completed);
+            }
+            Err(orchestration::operation::ConfirmError::Intent(error)) => {
+                println!("write-test: confirmation accepted for {expected_device}");
+                println!("write-test: WriteIntent construction rejected: {error:?}");
+                return Ok(WriteTestExit::Completed);
+            }
+        },
+        // EOF (e.g. stdin closed or redirected from an empty source): treat
+        // as "no answer given", never as an implicit yes.
+        PromptInput::Eof => {
+            println!(
+                "write-test: confirmation failed; no device was opened and nothing was written"
+            );
+            return Ok(WriteTestExit::Completed);
+        }
         PromptInput::Error(error) => {
             println!("write-test: failed to read the confirmation input: {error}");
-            false
+            println!(
+                "write-test: confirmation failed; no device was opened and nothing was written"
+            );
+            return Ok(WriteTestExit::Completed);
         }
         PromptInput::Cancelled => {
             println!();
@@ -1088,47 +1108,15 @@ fn run_write_test(
         }
     };
 
-    if !confirmed {
-        println!("write-test: confirmation failed; no device was opened and nothing was written");
-        return Ok(WriteTestExit::Completed);
-    }
-
-    println!("write-test: confirmation accepted for {expected_device}");
-
-    // `verify_mode` is the CLI's own choice (see the `write-test` dispatch in
-    // `main()`), frozen into the `ConfirmationToken`/`WritePlan` below via
-    // the same `WriteIntent`/Gate path the target/image/generation already
-    // go through -- there is no separate, second place this value is
-    // threaded into later. `SyncSucceeded` (produced far below, after a
-    // successful write+sync) carries this exact value forward unchanged,
-    // which is what `SyncSucceeded::begin_verify()` branches on to decide
-    // None/Quick/Full -- see the Built-in Verify wiring later in this
-    // function.
-    let intent =
-        match core::WriteIntent::from_selection(&state, selected_image.selection(), verify_mode) {
-            Ok(intent) => intent,
-            Err(error) => {
-                println!("write-test: WriteIntent construction rejected: {error:?}");
-                return Ok(WriteTestExit::Completed);
-            }
-        };
-    let confirmation = core::ConfirmationToken::confirm(intent);
+    let confirmed = operation.confirmed();
     println!(
         "write-test: confirmation created for {} (image_size={} bytes, verify_mode={:?})",
-        confirmation.intent().target_block_path(),
-        confirmation.intent().image_size(),
-        confirmation.intent().verify_mode()
+        confirmed.target_block_path, confirmed.image_size, confirmed.verify_mode
     );
 
-    let refreshed_for_gate = collect_device_snapshot(&baseline.block_path);
+    let refreshed_for_gate = collect_device_snapshot(operation.target_block_path());
 
-    let ready = match core::prepare_for_open(
-        &state,
-        refreshed_for_gate,
-        selected_image.selection(),
-        verify_mode,
-        Some(&confirmation),
-    ) {
+    let ready = match operation.fresh_gate(refreshed_for_gate) {
         Ok(ready) => ready,
         Err(error) => {
             println!("write-test: Write Gate rejected before OpenDevice: {error:?}");
@@ -1203,12 +1191,13 @@ fn run_write_test(
     // PreparedWrite -> AuthorizedWrite. The fd moves once, with no
     // dup()/try_clone(), exactly like `run_prepare_test`. Unlike
     // `run_prepare_test`, this `authorized` is not dropped here -- it is
-    // handed straight to `AuthorizedExecution::bind()` below, together with
-    // the exact same `selected_image` this function has held since the top.
+    // handed straight to `AuthorizedExecution::bind()` (through
+    // `operation.bind()`), together with the exact `SelectedImage` the
+    // operation has held since the image was opened.
     let authorized = prepared.begin();
     println!("write-test: WRITE SESSION AUTHORIZED (verify_mode={verify_mode:?})");
 
-    let execution = match write_job::AuthorizedExecution::bind(authorized, selected_image) {
+    let execution = match operation.bind(authorized) {
         Ok(execution) => execution,
         Err(error) => {
             println!("write-test: AuthorizedExecution::bind() rejected: {error:?}");
@@ -2330,27 +2319,29 @@ mod tests {
     }
 
     // `run_write_test` still performs the safe sequence in the same order
-    // after its helpers moved to `orchestration` (Phase 3A-1): each step
-    // appears exactly once, in this order.
+    // since its first half moved into `orchestration::operation` (Phase
+    // 3A-1 / 3A-3): each step appears exactly once, in this order. Inside
+    // the first-half steps (`prepare_image`, `confirm`, `fresh_gate`,
+    // `bind`) the order -- image open, Preflight, target re-check,
+    // confirmation text, WriteIntent, ConfirmationToken, Write Gate, bind --
+    // is checked by `orchestration::operation`'s own
+    // `the_first_half_runs_in_order`.
     #[test]
     fn run_write_test_keeps_its_step_order() {
         let write_test = production_fn_source("run_write_test");
         let steps = [
-            "attempt_select(&block_path)",
+            "orchestration::operation::select_write_target(&platform, &target)",
             "install_cancel_handler(cancel.clone())",
-            "image_source::open_image(&image_path)",
-            "orchestration::image::prepare_compressed_image(",
-            "state = core::revalidate(state, collect_device_snapshot(&target_block_path));",
+            "selected_target.prepare_image(",
+            "image.request_confirmation(&cancel)",
             "spawn_prompt_reader()",
-            "orchestration::confirmation_matches(&input, &expected_device)",
-            "core::WriteIntent::from_selection(",
-            "core::ConfirmationToken::confirm(intent)",
-            "let refreshed_for_gate = collect_device_snapshot(&baseline.block_path);",
-            "core::prepare_for_open(",
+            "pending.confirm(&input)",
+            "collect_device_snapshot(operation.target_block_path())",
+            "operation.fresh_gate(refreshed_for_gate)",
             "linux_access::OpenAccess::WriteExclusive",
             "core::finalize_prepared_write(",
             "prepared.begin()",
-            "write_job::AuthorizedExecution::bind(",
+            "operation.bind(authorized)",
             "execution.begin_write(cancel.clone())",
             "writing_execution.write(",
             "succeeded.begin_sync()",

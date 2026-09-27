@@ -6,10 +6,11 @@
 // assessment, and whether it can be selected is `core::selectability()`,
 // the same decision `core::select()` makes.
 
+use super::platform::Platform;
 use crate::device::{DeviceSnapshot, SnapshotFetchOutcome};
 use crate::execution::core::{self, NotSelectableReason, Selectability, SelectionState};
 use crate::identity::{IdentityComparison, InstanceComparison, compare_identity, compare_instance};
-use crate::linux_backend::{collect_device_snapshot, collect_device_snapshots};
+use crate::linux_backend::collect_device_snapshots;
 use crate::safety::{SafetyAssessment, assess_device};
 
 // An opaque reference to the device a caller wants to select, handed back
@@ -102,7 +103,8 @@ impl TargetRef {
 // What a UI shows for a device: a read-only copy of the descriptive fields.
 // Nothing here is read back for any decision; the Safety Engine's view is in
 // `DeviceCandidate::assessment()`.
-// Read by a future UI; built and checked by tests today.
+// The CLI's confirmation summary reads most fields; `read_only` and
+// `media_available` wait for a UI.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceDisplay {
@@ -116,6 +118,23 @@ pub(crate) struct DeviceDisplay {
     pub(crate) read_only: bool,
     pub(crate) media_available: bool,
     pub(crate) mount_points: Vec<String>,
+}
+
+impl DeviceDisplay {
+    pub(crate) fn from_snapshot(snapshot: &DeviceSnapshot) -> Self {
+        DeviceDisplay {
+            device: snapshot.device.clone(),
+            vendor: snapshot.vendor.clone(),
+            model: snapshot.model.clone(),
+            serial: snapshot.serial.clone(),
+            size: snapshot.size,
+            connection_bus: snapshot.connection_bus.clone(),
+            removable: snapshot.removable,
+            read_only: snapshot.read_only,
+            media_available: snapshot.media_available,
+            mount_points: snapshot.mount_points.clone(),
+        }
+    }
 }
 
 // One entry of the device list. Built only by `list_candidates()`; the
@@ -202,18 +221,7 @@ fn candidates_from(
 fn candidate_from_snapshot(snapshot: DeviceSnapshot) -> DeviceCandidate {
     let assessment = assess_device(&snapshot);
     let selectability = core::selectability(&snapshot, &assessment);
-    let display = DeviceDisplay {
-        device: snapshot.device.clone(),
-        vendor: snapshot.vendor.clone(),
-        model: snapshot.model.clone(),
-        serial: snapshot.serial.clone(),
-        size: snapshot.size,
-        connection_bus: snapshot.connection_bus.clone(),
-        removable: snapshot.removable,
-        read_only: snapshot.read_only,
-        media_available: snapshot.media_available,
-        mount_points: snapshot.mount_points.clone(),
-    };
+    let display = DeviceDisplay::from_snapshot(&snapshot);
 
     DeviceCandidate {
         target: TargetRef {
@@ -229,8 +237,11 @@ fn candidate_from_snapshot(snapshot: DeviceSnapshot) -> DeviceCandidate {
 // Selects the referenced device: reads a fresh snapshot of it, checks a
 // listed reference still names the same device and instance, then asks
 // `core::select()`.
-pub(crate) fn select_target(target: &TargetRef) -> Result<SelectionState, SelectTargetError> {
-    select_from_outcome(target, collect_device_snapshot(target.block_path()))
+pub(crate) fn select_target(
+    platform: &impl Platform,
+    target: &TargetRef,
+) -> Result<SelectionState, SelectTargetError> {
+    select_from_outcome(target, platform.fetch_snapshot(target.block_path()))
 }
 
 fn select_from_outcome(
@@ -252,6 +263,17 @@ fn select_from_outcome(
     core::select(snapshot).map_err(|core::SelectionError::NotSelectable(reasons)| {
         SelectTargetError::NotSelectable(reasons)
     })
+}
+
+// Lets other modules' tests hold a reference exactly as the candidate list
+// builds it, without a D-Bus call.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::{DeviceSnapshot, TargetRef, candidate_from_snapshot};
+
+    pub(crate) fn listed(snapshot: DeviceSnapshot) -> TargetRef {
+        candidate_from_snapshot(snapshot).target().clone()
+    }
 }
 
 #[cfg(test)]

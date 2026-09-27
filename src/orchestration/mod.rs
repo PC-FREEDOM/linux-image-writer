@@ -8,6 +8,8 @@
 
 pub(crate) mod candidates;
 pub(crate) mod image;
+pub(crate) mod operation;
+pub(crate) mod platform;
 pub(crate) mod sync_worker;
 
 // Pure comparison used by the Human Confirmation prompt in `main.rs`'s
