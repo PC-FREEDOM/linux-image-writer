@@ -23,8 +23,9 @@ use crate::image_source::compressed::PreflightProgress;
 use crate::writer::{WritePlan, WriteProgress};
 
 // Which of the operation's two device opens an event is about.
+/// Which of the operation's two device opens an event is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpenPurpose {
+pub enum OpenPurpose {
     // `OpenAccess::WriteExclusive` (read-write, O_EXCL).
     Write,
     // `OpenAccess::ReadOnlyDirect` (read-only, O_DIRECT, no O_EXCL).
@@ -66,6 +67,9 @@ pub(crate) enum OperationEvent<'a> {
     },
     DeviceOpenFailed {
         purpose: OpenPurpose,
+        // Read by the CLI binary's observer; the worker (the library) takes
+        // the same error from the outcome instead.
+        #[allow(dead_code)]
         error: &'a OpenDeviceError,
     },
     // The FD is bound to the re-verified device (major:minor, size, diskseq).
@@ -113,8 +117,10 @@ pub(crate) enum OperationEvent<'a> {
 }
 
 // The observer's answer to a confirmation request.
+/// The answer to a confirmation request: what the user typed (compared by the
+/// operation), or why there is none.
 #[derive(Debug)]
-pub(crate) enum ConfirmationDecision {
+pub enum ConfirmationDecision {
     // What the user typed, as entered; the operation compares it.
     Submitted(String),
     // There will be no answer (e.g. the input was closed).

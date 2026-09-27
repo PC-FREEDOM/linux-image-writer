@@ -883,6 +883,8 @@ fn direct_read<'b>(
 
 // Explicit, named close so call sites make the "no write happened" intent
 // visible instead of relying on an implicit Drop.
+// Used only by the CLI binary (`open-test`); unused in the library build.
+#[allow(dead_code)]
 pub fn close_without_writing(handle: OpenedDeviceHandle) {
     drop(handle.file);
 }

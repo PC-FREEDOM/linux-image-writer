@@ -103,8 +103,9 @@ pub enum SelectionError {
 // Which of `select()`'s conditions a snapshot failed. These explain the
 // selection decision only; *why* the Safety Engine judged a device the way
 // it did is `SafetyAssessment::reasons` (`RiskReason`), a separate question.
+/// A selection condition a device failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NotSelectableReason {
+pub enum NotSelectableReason {
     // The Safety Engine did not allow writing (`assessment.writable`).
     NotWritable,
     // The Safety Engine's risk level is not `Normal`.
@@ -119,8 +120,9 @@ pub(crate) enum NotSelectableReason {
 // assessment of it. `select()` and the device candidate list
 // (`orchestration::candidates`) both call `selectability()`, so the two can
 // never disagree.
+/// Whether a device can be selected for writing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Selectability {
+pub enum Selectability {
     Selectable,
     // Every failed condition, in the fixed order `selectability()` checks
     // them; never empty.
@@ -128,9 +130,10 @@ pub(crate) enum Selectability {
 }
 
 impl Selectability {
-    // Read by the candidate list's users (a future UI) and tests.
+    // Read by the library's users and tests; unused by the CLI binary.
+    /// `true` for [`Selectability::Selectable`].
     #[allow(dead_code)]
-    pub(crate) fn is_selectable(&self) -> bool {
+    pub fn is_selectable(&self) -> bool {
         matches!(self, Selectability::Selectable)
     }
 }
@@ -193,6 +196,8 @@ pub fn select(baseline: DeviceSnapshot) -> Result<SelectionState, SelectionError
 // `state` is returned unchanged — in particular, an `InterfacesAdded` for the
 // previously-selected path (e.g. the same device replugged) does NOT revive
 // an Invalidated selection.
+// Used only by the CLI binary (`select`); unused in the library build.
+#[allow(dead_code)]
 pub fn apply_event(state: SelectionState, event: &DeviceEvent) -> SelectionState {
     let SelectionState::Selected {
         baseline,
@@ -339,11 +344,11 @@ pub(in crate::execution) enum VerifyTargetCheckError {
 // `pub(crate)` (Verify Pre-flight Diagnostics implementation step 5+6):
 // `main.rs` now reads `VerifyTargetDiagnostics::hazards()` (a
 // `&[HardHazardReason]`) to build its human-readable hazard summary, so this
-// must be at least as visible as that accessor. Still not plain `pub` --
-// this is CLI-facing display data for this crate's own binary, not a public
-// library API.
+// must be at least as visible as that accessor. `pub` since Phase 3A-6:
+// the library re-exports it (`report::HardHazardReason`) as read-only
+// diagnostic data inside a Verify outcome; nothing accepts it as input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HardHazardReason {
+pub enum HardHazardReason {
     SystemDevice,
     ActiveSwap,
     ComplexStorage,
@@ -404,17 +409,14 @@ fn verify_target_hard_hazards(current: &DeviceSnapshot) -> Vec<HardHazardReason>
 // actually reach it (confirmed the hard way: `pub(in crate::execution)`
 // here produced a hard "private type" error at the `main.rs` call site, not
 // merely a lint, once `main.rs` was updated to match `check_target()`'s new
-// three-element error tuple). `main.rs` still does not read any field of
-// this type or call any of its accessors today -- it only discards the
-// value (`Err((image, error, _diagnostics))`) to keep compiling against the
-// new shape -- so this widening is the minimum Rust's own privacy rules
-// leave available, not a step toward exposing the type's contents; whether
-// `main.rs` should actually read from it is still Step 5's decision, not
-// this one's. `Debug, Clone` only -- `DeviceSnapshot` itself does not derive
+// three-element error tuple). `pub` since Phase 3A-6: the library
+// re-exports it (`report::VerifyTargetDiagnostics`) as read-only diagnostic
+// data carried by Verify events and outcomes; its fields stay private and
+// it has no public constructor, and nothing accepts it as input. `Debug, Clone` only -- `DeviceSnapshot` itself does not derive
 // `Copy`/`PartialEq`/`Eq`, so neither can this type without first changing
 // `device.rs`, which is out of scope for this step.
 #[derive(Debug, Clone)]
-pub(crate) struct VerifyTargetDiagnostics {
+pub struct VerifyTargetDiagnostics {
     baseline: DeviceSnapshot,
     current: DeviceSnapshot,
     identity: IdentityComparison,
@@ -438,23 +440,23 @@ pub(crate) struct VerifyTargetDiagnostics {
 // owned data -- `main.rs`'s formatting helpers only ever need to read these
 // fields, never to own or outlive `self`.
 impl VerifyTargetDiagnostics {
-    pub(crate) fn baseline(&self) -> &DeviceSnapshot {
+    pub fn baseline(&self) -> &DeviceSnapshot {
         &self.baseline
     }
 
-    pub(crate) fn current(&self) -> &DeviceSnapshot {
+    pub fn current(&self) -> &DeviceSnapshot {
         &self.current
     }
 
-    pub(crate) fn identity(&self) -> IdentityComparison {
+    pub fn identity(&self) -> IdentityComparison {
         self.identity
     }
 
-    pub(crate) fn instance(&self) -> InstanceComparison {
+    pub fn instance(&self) -> InstanceComparison {
         self.instance
     }
 
-    pub(crate) fn hazards(&self) -> &[HardHazardReason] {
+    pub fn hazards(&self) -> &[HardHazardReason] {
         &self.hazards
     }
 }
@@ -910,6 +912,8 @@ impl ImageSelection {
 // constructor. `main.rs`'s `write-test` now constructs all three
 // (`parse_verify_mode`), so the attribute no longer suppresses anything; it
 // is left in place only because this change is limited to comments.
+/// What to read back after writing: nothing, sampled windows (raw images only),
+/// or the whole image.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyMode {

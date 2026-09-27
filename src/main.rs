@@ -876,11 +876,11 @@ fn run_write_test(
         return Ok(WriteTestExit::Completed);
     }
 
-    let request = orchestration::operation::WriteOperationRequest {
-        target: orchestration::candidates::TargetRef::from_block_path(block_path.as_str()),
-        image_path: image_path.clone(),
+    let request = orchestration::operation::WriteOperationRequest::new(
+        orchestration::candidates::TargetRef::from_block_path(block_path.as_str()),
+        image_path.clone(),
         verify_mode,
-    };
+    );
     let mut observer = CliObserver {
         image_path: &image_path,
         cancel: cancel.clone(),

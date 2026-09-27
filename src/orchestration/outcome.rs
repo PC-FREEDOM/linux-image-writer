@@ -12,8 +12,9 @@ use crate::execution::write_job::{
     VerifyStartError, VerifySucceeded,
 };
 
+/// How a write operation ended.
 #[derive(Debug)]
-pub(crate) enum OperationOutcome {
+pub enum OperationOutcome {
     // Write and sync succeeded, and Verify succeeded (or `VerifyMode::None`
     // skipped it: `verify.skipped`).
     Completed {
@@ -26,8 +27,9 @@ pub(crate) enum OperationOutcome {
 
 // Where a cancellation stopped the operation -- always at one of the
 // existing cancel points.
+/// Which cancel point stopped the operation.
 #[derive(Debug)]
-pub(crate) enum CancelledAt {
+pub enum CancelledAt {
     // During a compressed image's Preflight; nothing was opened on the target.
     Preflight,
     // After the image was prepared, before the confirmation was shown.
@@ -50,8 +52,9 @@ pub(crate) enum CancelledAt {
     },
 }
 
+/// Why the operation stopped, with the failing step's own error.
 #[derive(Debug)]
-pub(crate) enum OperationError {
+pub enum OperationError {
     // ---- before the target is opened ----
     Target(TargetNotReady),
     Image(PrepareImageError),
@@ -93,8 +96,9 @@ pub(crate) enum OperationError {
     },
 }
 
+/// Why Verify did not start after a successful write and sync.
 #[derive(Debug)]
-pub(crate) enum VerifyNotStarted {
+pub enum VerifyNotStarted {
     // The test-only pause before Verify got no input.
     TestPauseEnded,
     // Verify's target re-check refused; `diagnostics` is `None` only when
@@ -116,7 +120,8 @@ pub(crate) enum VerifyNotStarted {
 }
 
 impl OperationOutcome {
-    pub(crate) fn is_cancelled(&self) -> bool {
+    /// `true` for [`OperationOutcome::Cancelled`].
+    pub fn is_cancelled(&self) -> bool {
         matches!(self, OperationOutcome::Cancelled(_))
     }
 }

@@ -26,19 +26,25 @@ use crate::safety::{SafetyAssessment, assess_device};
 // path>` argument means) has nothing to compare with and is only the
 // unverified path; the fields are private, so neither kind can be forged or
 // turned into the other.
+/// An opaque reference to a device picked from
+/// [`list_candidates`](crate::list_candidates). It carries no authority: the
+/// operation re-reads and re-verifies the device, and refuses it if it is no
+/// longer the device and instance that was listed.
 #[derive(Debug, Clone)]
-pub(crate) struct TargetRef {
+pub struct TargetRef {
     block_path: String,
     origin: TargetOrigin,
 }
 
 #[derive(Debug, Clone)]
 enum TargetOrigin {
-    // Built from this snapshot by the candidate list (used from tests until
-    // a UI exists).
+    // Built from this snapshot by the candidate list (the library's
+    // `list_candidates`; the CLI binary never builds one).
     #[allow(dead_code)]
     Listed(DeviceSnapshot),
-    // Only a block path was given.
+    // Only a block path was given: the CLI's argument. Never built by the
+    // library, whose only source of references is the candidate list.
+    #[allow(dead_code)]
     BlockPathOnly,
 }
 
@@ -55,12 +61,14 @@ pub(crate) enum TargetCheck {
 // Why a listed target no longer counts as the one the user saw. Anything
 // short of `Same` + `SameInstance` -- including insufficient information --
 // is a change: the user has to pick again from a fresh list.
+/// Why a listed target no longer counts as the device the user saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TargetChange {
+pub enum TargetChange {
     // The fresh snapshot is for a different block path (not expected from
     // `select_target()`, which reads by the reference's own path).
     DifferentTarget,
-    // Fields are read through Debug output only, until a UI reads them.
+    // Library users read these fields; the CLI binary only prints them
+    // with Debug.
     #[allow(dead_code)]
     Device {
         identity: IdentityComparison,
@@ -69,6 +77,9 @@ pub(crate) enum TargetChange {
 }
 
 impl TargetRef {
+    // The CLI binary's block-path argument. Not part of the library's API
+    // (crate-private) and unused in the library build.
+    #[allow(dead_code)]
     pub(crate) fn from_block_path(block_path: impl Into<String>) -> Self {
         TargetRef {
             block_path: block_path.into(),
@@ -76,7 +87,8 @@ impl TargetRef {
         }
     }
 
-    pub(crate) fn block_path(&self) -> &str {
+    /// The device's UDisks2 block object path, for display.
+    pub fn block_path(&self) -> &str {
         &self.block_path
     }
 
@@ -104,20 +116,21 @@ impl TargetRef {
 // Nothing here is read back for any decision; the Safety Engine's view is in
 // `DeviceCandidate::assessment()`.
 // The CLI's confirmation summary reads most fields; `read_only` and
-// `media_available` wait for a UI.
+// `media_available` are for library users.
+/// Descriptive fields of a device, for display only.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeviceDisplay {
-    pub(crate) device: String,
-    pub(crate) vendor: String,
-    pub(crate) model: String,
-    pub(crate) serial: String,
-    pub(crate) size: u64,
-    pub(crate) connection_bus: String,
-    pub(crate) removable: bool,
-    pub(crate) read_only: bool,
-    pub(crate) media_available: bool,
-    pub(crate) mount_points: Vec<String>,
+pub struct DeviceDisplay {
+    pub device: String,
+    pub vendor: String,
+    pub model: String,
+    pub serial: String,
+    pub size: u64,
+    pub connection_bus: String,
+    pub removable: bool,
+    pub read_only: bool,
+    pub media_available: bool,
+    pub mount_points: Vec<String>,
 }
 
 impl DeviceDisplay {
@@ -141,32 +154,39 @@ impl DeviceDisplay {
 // fields are private and have no setters, so the assessment and
 // selectability shown are always the ones computed from the same snapshot
 // the entry's `TargetRef` remembers.
-// Read by a future UI; built and checked by tests today.
+// Part of the library's Production API; unused by the CLI binary.
+/// One entry of the device list: what to show, the Safety Engine's assessment,
+/// whether it can be selected, and the reference to select it by.
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(crate) struct DeviceCandidate {
+pub struct DeviceCandidate {
     target: TargetRef,
     display: DeviceDisplay,
     assessment: SafetyAssessment,
     selectability: Selectability,
 }
 
-// Read by a future UI; built and checked by tests today.
+// Part of the library's Production API; unused by the CLI binary.
 #[allow(dead_code)]
 impl DeviceCandidate {
-    pub(crate) fn target(&self) -> &TargetRef {
+    /// The reference to put in a
+    /// [`WriteOperationRequest`](crate::WriteOperationRequest).
+    pub fn target(&self) -> &TargetRef {
         &self.target
     }
 
-    pub(crate) fn display(&self) -> &DeviceDisplay {
+    /// What to show for this device.
+    pub fn display(&self) -> &DeviceDisplay {
         &self.display
     }
 
-    pub(crate) fn assessment(&self) -> &SafetyAssessment {
+    /// The Safety Engine's assessment of this device.
+    pub fn assessment(&self) -> &SafetyAssessment {
         &self.assessment
     }
 
-    pub(crate) fn selectability(&self) -> &Selectability {
+    /// Whether this device can be selected, and if not, why.
+    pub fn selectability(&self) -> &Selectability {
         &self.selectability
     }
 }
@@ -176,16 +196,18 @@ impl DeviceCandidate {
 // /proc/swaps) as an error for the whole list -- never a partial list -- and
 // that error is passed on as it is (its non-D-Bus causes are already text at
 // the backend boundary; Phase 3A keeps that).
-// Read by a future UI; built and checked by tests today.
+// Part of the library's Production API; unused by the CLI binary.
+/// Why the device list could not be produced (never a partial list).
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(crate) enum CandidateListError {
+pub enum CandidateListError {
     Collection(zbus::Error),
 }
 
 // Why `select_target()` did not produce a `Selected` state.
+/// Why a target could not be selected when the operation started.
 #[derive(Debug)]
-pub(crate) enum SelectTargetError {
+pub enum SelectTargetError {
     // The block path no longer exists.
     NotFound,
     // The device's information could not be read (backend fail-closed; the
@@ -194,16 +216,18 @@ pub(crate) enum SelectTargetError {
     // A listed target is no longer the device the user saw.
     CandidateChanged(TargetChange),
     // `core::select()` refused it; every failed condition.
-    // The reasons are read through Debug output only, until a UI reads them.
+    // Library users read the reasons; the CLI binary does not.
     #[allow(dead_code)]
     NotSelectable(Vec<NotSelectableReason>),
 }
 
 // Every whole disk the backend reports, each with its Safety Engine
 // assessment and selectability.
-// Called by a future UI; its pieces are tested today.
+// The library's device list; unused by the CLI binary.
+/// Lists every whole disk the system reports, each with its Safety Engine
+/// assessment and selectability. Read-only.
 #[allow(dead_code)]
-pub(crate) fn list_candidates() -> Result<Vec<DeviceCandidate>, CandidateListError> {
+pub fn list_candidates() -> Result<Vec<DeviceCandidate>, CandidateListError> {
     candidates_from(collect_device_snapshots())
 }
 

@@ -9,7 +9,7 @@ use crate::image_source;
 // Why a compressed image was not accepted for writing. Every case stops
 // before the target is opened.
 #[derive(Debug)]
-pub(crate) enum CompressedImageRejection {
+pub enum CompressedImageRejection {
     // Quick Verify needs random access, which a compressed image cannot
     // provide; refused before Preflight (and before any confirmation).
     QuickVerifyUnsupported(image_source::CompressionFormat),

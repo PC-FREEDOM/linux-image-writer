@@ -171,6 +171,8 @@ pub fn write<R: Read, W: Write>(
 // Intended to grow into distinct Quick Verify (e.g. sampled chunks or a
 // hash) / Full Verify (this, exhaustive) / None policies later; today it
 // only implements the exhaustive comparison.
+// Used only by the CLI binary (`writer-test`); unused in the library build.
+#[allow(dead_code)]
 pub fn verify_equal<A: Read, B: Read>(mut a: A, mut b: B) -> io::Result<bool> {
     let mut buf_a = [0u8; 8192];
     let mut buf_b = [0u8; 8192];

@@ -156,6 +156,7 @@ const CANCEL_DEVICE_LOST: u8 = 2;
 // expected to request deliberately -- it exists as `CancelHandle::reason()`'s
 // safe fallback (see there) so resolving a reason can never panic even if
 // something unforeseen ends up in the underlying flag.
+/// Why a cancellation was requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
     UserRequested,
@@ -180,6 +181,7 @@ pub enum CancelReason {
 // that *when* such wiring is added later, it has a reason to record --
 // today, tests set it directly, exactly like a future device-removal watcher
 // would.
+/// A shared cancellation flag; cloning shares it.
 #[derive(Debug, Clone)]
 pub struct CancelHandle {
     state: Arc<AtomicU8>,
@@ -198,6 +200,7 @@ impl CancelHandle {
     // reason is a best-effort diagnostic, not a safety-relevant fact -- the
     // fact that *some* cancellation was requested is what `writer::write()`
     // actually acts on.
+    /// Requests cancellation; the operation stops at its next cancel point.
     pub fn request_cancel(&self, reason: CancelReason) {
         let value = match reason {
             CancelReason::UserRequested => CANCEL_USER_REQUESTED,
@@ -207,6 +210,7 @@ impl CancelHandle {
         self.state.store(value, Ordering::SeqCst);
     }
 
+    /// Whether cancellation has been requested.
     pub fn is_requested(&self) -> bool {
         self.state.load(Ordering::SeqCst) != CANCEL_NONE
     }
@@ -248,8 +252,9 @@ pub enum WriteStage {
 // added later without reshaping `writer.rs`, `linux_access.rs`, or the
 // Gate's own `WriteGateError`. `Sync(io::Error)` is kept as a raw
 // `io::Error` for now, deliberately not summarized into a curated
-// GUI-facing type -- there is no GUI/API boundary in this codebase yet
-// (see CLAUDE.md), and `Write(WriteError)` already isn't summarized either;
+// GUI-facing type -- the library exposes it as it is (read-only outcome
+// data, `report::WriteJobFailureCause`), and `Write(WriteError)` isn't
+// summarized either;
 // designing a presentation layer for Job-level errors is a single future
 // concern that should cover both variants together, not something to solve
 // piecemeal per error source.

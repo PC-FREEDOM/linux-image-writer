@@ -3,6 +3,18 @@ name = "linux-usb-writer"
 version = "0.1.0"
 edition = "2024"
 
+# The library (src/lib.rs) exposes only the Production API; every other
+# module is private to it. The CLI binary (src/main.rs) compiles the same
+# modules as its own crate, so its diagnostic modes (open-test, prepare-test,
+# ...) can use internals the library never exposes -- Rust has no visibility
+# that would show them to this package's binary only. The unit tests inside
+# those modules therefore run once, with the binary's tests (`test = false`
+# here avoids running them twice); the library's public surface is tested by
+# tests/production_api.rs and the doc tests in src/lib.rs.
+[lib]
+path = "src/lib.rs"
+test = false
+
 [dependencies]
 ctrlc = "3.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend", "runtime_detection"] }

@@ -32,9 +32,10 @@
 // after a decision arrives, so a cancellation always wins (the operation's
 // confirmation cancel point).
 //
-// Only a future GUI needs this module, and only a GUI reads most of the
-// message fields (a display); until then the module is exercised by its own
-// tests, hence the module-wide `dead_code` allowance.
+// This module is the library's Production API entry point (see lib.rs).
+// The CLI binary, which compiles the same modules as its own crate, does not
+// use it, and a UI reads most message fields only for display; hence the
+// module-wide `dead_code` allowance.
 #![allow(dead_code)]
 
 use std::io;
@@ -63,8 +64,9 @@ const CONFIRMATION_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // borrows, this owns a copy; the one exception is `DeviceOpenFailed`, whose
 // `OpenDeviceError` travels in the outcome (`WriteDeviceRejected` /
 // `VerifyNotStarted::Start`) instead of being copied here.
+/// A step of the operation, as it happens (owned data).
 #[derive(Debug)]
-pub(crate) enum WorkerEvent {
+pub enum WorkerEvent {
     TargetSelected {
         target: DeviceDisplay,
         block_path: String,
@@ -235,15 +237,16 @@ impl WorkerEvent {
 // An owned copy of the operation's `ConfirmationRequest`: what the user
 // must be shown, and the text they must type. Showing it and returning what
 // was typed is all a UI does; the comparison is the operation's.
+/// What the user must be shown before writing, and the text they must type.
 #[derive(Debug, Clone)]
-pub(crate) struct WorkerConfirmationRequest {
-    pub(crate) target: DeviceDisplay,
-    pub(crate) block_path: String,
-    pub(crate) diskseq: Option<u64>,
-    pub(crate) assessment: SafetyAssessment,
-    pub(crate) image_size: u64,
-    pub(crate) verify_mode: VerifyMode,
-    pub(crate) expected_text: String,
+pub struct WorkerConfirmationRequest {
+    pub target: DeviceDisplay,
+    pub block_path: String,
+    pub diskseq: Option<u64>,
+    pub assessment: SafetyAssessment,
+    pub image_size: u64,
+    pub verify_mode: VerifyMode,
+    pub expected_text: String,
 }
 
 impl WorkerConfirmationRequest {
@@ -262,8 +265,9 @@ impl WorkerConfirmationRequest {
 
 // Everything the worker sends to the UI, in the order it happens. After
 // `Finished` the worker sends nothing more and its thread ends.
+/// Everything the worker sends to the UI, in order; `Finished` is last.
 #[derive(Debug)]
-pub(crate) enum WorkerMessage {
+pub enum WorkerMessage {
     Event(WorkerEvent),
     ConfirmationRequested(WorkerConfirmationRequest),
     // Boxed: an outcome is far larger than any other message, and is sent
@@ -274,8 +278,9 @@ pub(crate) enum WorkerMessage {
 // The UI/worker communication lifecycle as the UI side has seen it -- not
 // the operation's own state, which only the operation knows. ("Idle" is
 // simply having no `WriteWorker`.)
+/// The UI/worker communication lifecycle, as the UI side has seen it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkerState {
+pub enum WorkerState {
     // Spawned; nothing received yet.
     Started,
     Running,
@@ -290,8 +295,9 @@ pub(crate) enum WorkerState {
 }
 
 // Why `submit_confirmation` did not deliver the decision.
+/// Why a confirmation decision was not delivered.
 #[derive(Debug)]
-pub(crate) enum SubmitError {
+pub enum SubmitError {
     // No confirmation is pending; the decision is handed back.
     NotWaiting(ConfirmationDecision),
     // The worker is gone.
@@ -299,7 +305,8 @@ pub(crate) enum SubmitError {
 }
 
 // The UI side of one write operation running on its own thread.
-pub(crate) struct WriteWorker {
+/// The UI side of one write operation running on its own thread.
+pub struct WriteWorker {
     messages: Receiver<WorkerMessage>,
     decisions: Option<Sender<ConfirmationDecision>>,
     cancel: CancelHandle,
@@ -310,7 +317,8 @@ pub(crate) struct WriteWorker {
 // Starts `request` on a new thread with the production platform (the
 // sequence `run_write_operation` runs). A thread that cannot be created
 // is an error before anything has started.
-pub(crate) fn spawn_write_worker(request: WriteOperationRequest) -> io::Result<WriteWorker> {
+/// Starts the write operation described by `request` on a new thread.
+pub fn spawn_write_worker(request: WriteOperationRequest) -> io::Result<WriteWorker> {
     spawn_on(LinuxPlatform, request)
 }
 
@@ -346,23 +354,27 @@ fn spawn_on<P: Platform + Send + 'static>(
 }
 
 impl WriteWorker {
-    pub(crate) fn state(&self) -> WorkerState {
+    /// The lifecycle state as of the last message received.
+    pub fn state(&self) -> WorkerState {
         self.state
     }
 
     // A handle a UI can keep (e.g. for a Cancel button); cancelling through
     // it is the same as `request_cancel`.
-    pub(crate) fn cancel_handle(&self) -> CancelHandle {
+    /// A handle that cancels this operation (e.g. for a Cancel button).
+    pub fn cancel_handle(&self) -> CancelHandle {
         self.cancel.clone()
     }
 
-    pub(crate) fn request_cancel(&self) {
+    /// Asks the operation to stop at its next cancel point.
+    pub fn request_cancel(&self) {
         self.cancel.request_cancel(CancelReason::UserRequested);
     }
 
     // Waits for the next message; `None` once the worker has finished (or
     // was lost) and nothing more will come.
-    pub(crate) fn recv(&mut self) -> Option<WorkerMessage> {
+    /// Waits for the next message; `None` once nothing more will come.
+    pub fn recv(&mut self) -> Option<WorkerMessage> {
         match self.messages.recv() {
             Ok(message) => Some(self.observe(message)),
             Err(_) => {
@@ -373,7 +385,8 @@ impl WriteWorker {
     }
 
     // For a UI event loop: the next message if one is waiting.
-    pub(crate) fn try_recv(&mut self) -> Result<WorkerMessage, TryRecvError> {
+    /// The next message if one is waiting.
+    pub fn try_recv(&mut self) -> Result<WorkerMessage, TryRecvError> {
         match self.messages.try_recv() {
             Ok(message) => Ok(self.observe(message)),
             Err(TryRecvError::Disconnected) => {
@@ -384,10 +397,8 @@ impl WriteWorker {
         }
     }
 
-    pub(crate) fn recv_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<WorkerMessage, RecvTimeoutError> {
+    /// Waits up to `timeout` for the next message.
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<WorkerMessage, RecvTimeoutError> {
         match self.messages.recv_timeout(timeout) {
             Ok(message) => Ok(self.observe(message)),
             Err(RecvTimeoutError::Disconnected) => {
@@ -400,7 +411,8 @@ impl WriteWorker {
 
     // Answers the pending confirmation with what the user typed (or why
     // there is no answer). Only valid while `WaitingForConfirmation`.
-    pub(crate) fn submit_confirmation(
+    /// Answers the pending confirmation request.
+    pub fn submit_confirmation(
         &mut self,
         decision: ConfirmationDecision,
     ) -> Result<(), SubmitError> {
@@ -421,7 +433,8 @@ impl WriteWorker {
 
     // Waits for the worker thread to end. After `Finished` this returns
     // promptly; `Err` is a panic on the worker thread.
-    pub(crate) fn join(mut self) -> thread::Result<()> {
+    /// Waits for the worker thread to end; `Err` if it panicked.
+    pub fn join(mut self) -> thread::Result<()> {
         match self.thread.take() {
             Some(thread) => thread.join(),
             None => Ok(()),

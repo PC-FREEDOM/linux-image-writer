@@ -72,7 +72,7 @@ pub(crate) struct SelectedWriteTarget {
 
 // Why there is no usable target.
 #[derive(Debug)]
-pub(crate) enum TargetNotReady {
+pub enum TargetNotReady {
     // Selecting it failed (see `candidates::select_target`); there is no
     // selection.
     Select(SelectTargetError),
@@ -163,7 +163,7 @@ impl SelectedWriteTarget {
 
 // Why `prepare_image` stopped. Nothing was opened on the target.
 #[derive(Debug)]
-pub(crate) enum PrepareImageError {
+pub enum PrepareImageError {
     // `open_image` refused or failed (including an unsupported format or a
     // name that does not match the content).
     Image(ImageSourceError),
@@ -237,7 +237,7 @@ pub(crate) struct ConfirmationRequest<'a> {
 // Why `confirm()` did not produce a `PreparedOperation`. Either way
 // nothing was opened on the target.
 #[derive(Debug)]
-pub(crate) enum ConfirmError {
+pub enum ConfirmError {
     // The typed text is not the expected text (compared as
     // `confirmation_matches` does).
     Mismatch,
@@ -353,16 +353,35 @@ impl PreparedOperation {
 // path (opened once, here), the Verify mode a policy. Everything the
 // sequence depends on -- snapshots, selection, confirmation token, FDs,
 // authorizations -- is produced inside the operation.
-pub(crate) struct WriteOperationRequest {
+/// What to write where: a listed target, an image path and a [`VerifyMode`].
+/// Only choices -- the operation derives everything else itself.
+pub struct WriteOperationRequest {
     pub(crate) target: TargetRef,
     pub(crate) image_path: String,
     pub(crate) verify_mode: VerifyMode,
+}
+
+impl WriteOperationRequest {
+    /// A request to write the image at `image_path` to `target`, then
+    /// verify it as `verify_mode` says. Nothing is opened or checked here;
+    /// the operation does all of that, in order, once it runs.
+    pub fn new(target: TargetRef, image_path: impl Into<String>, verify_mode: VerifyMode) -> Self {
+        WriteOperationRequest {
+            target,
+            image_path: image_path.into(),
+            verify_mode,
+        }
+    }
 }
 
 // Runs one write operation from start to finish on the calling thread and
 // reports how it ended. `cancel` is checked only at the existing cancel
 // points; the observer sees the steps as they happen and is asked for the
 // typed confirmation.
+//
+// The CLI binary's entry point. The library's entry point is the worker
+// (`worker::spawn_write_worker`), so this is unused in the library build.
+#[allow(dead_code)]
 pub(crate) fn run_write_operation(
     request: WriteOperationRequest,
     cancel: &CancelHandle,
