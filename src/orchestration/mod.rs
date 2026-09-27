@@ -6,6 +6,7 @@
 // `run_write_test` still performs the sequence itself and calls them. Not a
 // public API: nothing here is visible outside this crate.
 
+pub(crate) mod candidates;
 pub(crate) mod image;
 pub(crate) mod sync_worker;
 

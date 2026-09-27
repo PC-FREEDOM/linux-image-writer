@@ -96,14 +96,72 @@ pub enum SelectionState {
 
 #[derive(Debug)]
 pub enum SelectionError {
-    NotSelectable,
+    // Every selectability condition the snapshot failed (never empty).
+    NotSelectable(Vec<NotSelectableReason>),
 }
 
-fn is_selectable(snapshot: &DeviceSnapshot, assessment: &SafetyAssessment) -> bool {
-    assessment.writable
-        && matches!(assessment.risk_level, RiskLevel::Normal)
-        && snapshot.media_available
-        && snapshot.size > 0
+// Which of `select()`'s conditions a snapshot failed. These explain the
+// selection decision only; *why* the Safety Engine judged a device the way
+// it did is `SafetyAssessment::reasons` (`RiskReason`), a separate question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotSelectableReason {
+    // The Safety Engine did not allow writing (`assessment.writable`).
+    NotWritable,
+    // The Safety Engine's risk level is not `Normal`.
+    RiskNotNormal,
+    // `media_available` is false.
+    MediaUnavailable,
+    // `size` is 0.
+    ZeroSize,
+}
+
+// The selection decision for one snapshot and the Safety Engine's
+// assessment of it. `select()` and the device candidate list
+// (`orchestration::candidates`) both call `selectability()`, so the two can
+// never disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selectability {
+    Selectable,
+    // Every failed condition, in the fixed order `selectability()` checks
+    // them; never empty.
+    NotSelectable(Vec<NotSelectableReason>),
+}
+
+impl Selectability {
+    // Read by the candidate list's users (a future UI) and tests.
+    #[allow(dead_code)]
+    pub(crate) fn is_selectable(&self) -> bool {
+        matches!(self, Selectability::Selectable)
+    }
+}
+
+// The one place the selection conditions are written down: writable,
+// risk level `Normal`, media available, non-zero size -- all four must hold.
+// Each failed condition is reported, not just the first.
+pub(crate) fn selectability(
+    snapshot: &DeviceSnapshot,
+    assessment: &SafetyAssessment,
+) -> Selectability {
+    let mut reasons = Vec::new();
+
+    if !assessment.writable {
+        reasons.push(NotSelectableReason::NotWritable);
+    }
+    if !matches!(assessment.risk_level, RiskLevel::Normal) {
+        reasons.push(NotSelectableReason::RiskNotNormal);
+    }
+    if !snapshot.media_available {
+        reasons.push(NotSelectableReason::MediaUnavailable);
+    }
+    if snapshot.size == 0 {
+        reasons.push(NotSelectableReason::ZeroSize);
+    }
+
+    if reasons.is_empty() {
+        Selectability::Selectable
+    } else {
+        Selectability::NotSelectable(reasons)
+    }
 }
 
 // Explicit, user-driven action: always starts a fresh Selection from the
@@ -113,8 +171,8 @@ fn is_selectable(snapshot: &DeviceSnapshot, assessment: &SafetyAssessment) -> bo
 pub fn select(baseline: DeviceSnapshot) -> Result<SelectionState, SelectionError> {
     let baseline_assessment = assess_device(&baseline);
 
-    if !is_selectable(&baseline, &baseline_assessment) {
-        return Err(SelectionError::NotSelectable);
+    if let Selectability::NotSelectable(reasons) = selectability(&baseline, &baseline_assessment) {
+        return Err(SelectionError::NotSelectable(reasons));
     }
 
     // A fresh generation every time, unconditionally -- including a reselect
@@ -1594,7 +1652,7 @@ mod tests {
 
         let state = select(snapshot);
 
-        assert!(matches!(state, Err(SelectionError::NotSelectable)));
+        assert!(matches!(state, Err(SelectionError::NotSelectable(_))));
     }
 
     // C. InterfacesRemoved on the selected target's own block_path -> Invalidated(TargetRemoved).
@@ -2109,7 +2167,7 @@ mod tests {
 
         let result = select(system_disk);
 
-        assert!(matches!(result, Err(SelectionError::NotSelectable)));
+        assert!(matches!(result, Err(SelectionError::NotSelectable(_))));
         assert!(!is_ready_to_open(&SelectionState::NoSelection));
     }
 

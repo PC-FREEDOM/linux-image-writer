@@ -8,7 +8,6 @@ mod orchestration;
 mod safety;
 mod writer;
 
-use device::SnapshotFetchOutcome;
 use execution::{core, linux_access, write_job};
 use identity::{compare_identity, compare_instance, IdentityComparison, InstanceComparison};
 use linux_backend::{collect_device_snapshot, collect_device_snapshots};
@@ -284,21 +283,30 @@ fn run_select(block_path: String) -> zbus::Result<()> {
     Ok(())
 }
 
+// Selection goes through the same entry a UI will use
+// (`orchestration::candidates::select_target`), with the CLI argument as an
+// unverified block-path reference: a fresh snapshot, then `core::select()`.
+// The messages are the ones this function printed before.
 fn attempt_select(block_path: &str) -> core::SelectionState {
-    match collect_device_snapshot(block_path) {
-        SnapshotFetchOutcome::Found(snapshot) => match core::select(snapshot) {
-            Ok(state) => state,
-            Err(error) => {
-                eprintln!("select rejected: {error:?}");
-                core::SelectionState::NoSelection
+    use orchestration::candidates::{SelectTargetError, TargetRef, select_target};
+
+    match select_target(&TargetRef::from_block_path(block_path)) {
+        Ok(state) => state,
+        Err(error) => {
+            match error {
+                SelectTargetError::NotSelectable(_) => eprintln!("select rejected: NotSelectable"),
+                SelectTargetError::NotFound => {
+                    eprintln!("select failed: no such target: {block_path}")
+                }
+                SelectTargetError::SnapshotUnavailable(reason) => {
+                    eprintln!("select failed: {reason}")
+                }
+                // Only a reference from the candidate list can report this;
+                // a block-path reference has nothing to compare with.
+                SelectTargetError::CandidateChanged(change) => {
+                    eprintln!("select rejected: {change:?}")
+                }
             }
-        },
-        SnapshotFetchOutcome::NotFound => {
-            eprintln!("select failed: no such target: {block_path}");
-            core::SelectionState::NoSelection
-        }
-        SnapshotFetchOutcome::Error(reason) => {
-            eprintln!("select failed: {reason}");
             core::SelectionState::NoSelection
         }
     }
