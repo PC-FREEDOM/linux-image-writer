@@ -199,6 +199,12 @@ impl CompressedImageFile {
     pub fn compressed_size(&self) -> u64 {
         self.compressed_size
     }
+
+    // The access the source validated from this file will provide
+    // (`CompressedImageSource::access`), known before Preflight.
+    pub fn access(&self) -> ImageSourceAccess {
+        compressed::COMPRESSED_IMAGE_ACCESS
+    }
 }
 
 // The single entry point for opening a user-selected image: opens `path`

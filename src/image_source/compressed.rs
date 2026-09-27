@@ -295,13 +295,19 @@ impl CompressedImageSource {
     }
 }
 
+// The access a compressed image provides: its decoded stream can only be
+// replayed from the start, never read at an arbitrary offset. Also what an
+// opened, not yet validated compressed file reports
+// (`CompressedImageFile::access`), so both say the same.
+pub(crate) const COMPRESSED_IMAGE_ACCESS: ImageSourceAccess = ImageSourceAccess::SequentialReplay;
+
 impl ImageSource for CompressedImageSource {
     fn logical_size(&self) -> u64 {
         self.preflighted.logical_size()
     }
 
     fn access(&self) -> ImageSourceAccess {
-        ImageSourceAccess::SequentialReplay
+        COMPRESSED_IMAGE_ACCESS
     }
 
     // Replay errors keep their typed payloads inside the `io::Error` (see

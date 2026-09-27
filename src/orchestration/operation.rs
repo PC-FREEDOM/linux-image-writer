@@ -12,8 +12,9 @@
 //                                 re-verified after it
 //   .request_confirmation()      stop if cancellation was requested
 //     -> PendingConfirmation      (what the user must be shown and must type)
-//   .confirm(typed)              the typed text must match; then WriteIntent
-//     -> PreparedOperation        and ConfirmationToken
+//   .confirm(typed)              the typed text must match -- or the user
+//   / .approve()                  explicitly approved the request as shown;
+//     -> PreparedOperation        then WriteIntent and ConfirmationToken
 //
 // Each step consumes the previous value, so no step can be skipped or
 // repeated. `PreparedOperation` keeps the confirmation token, the
@@ -214,7 +215,8 @@ impl ImagePrepared {
 // ---- Step 3: the human confirmation ----
 
 // Waiting for the user to confirm. `request()` is what they must be shown
-// and what they must type; `confirm()` is the only way on.
+// and what they may type; `confirm()` (typed) and `approve()` (explicit
+// approval) are the only ways on, and both end in the same place.
 pub(crate) struct PendingConfirmation {
     state: SelectionState,
     image: SelectedImage,
@@ -260,16 +262,28 @@ impl PendingConfirmation {
     }
 
     // Accepts the confirmation only if `typed` matches the target's `/dev`
-    // node (`confirmation_matches`: trimmed, then exact). Then freezes what
-    // was confirmed -- target, selection, image, Verify mode -- into a
-    // `WriteIntent` and a `ConfirmationToken`, which never leave the
-    // returned `PreparedOperation`.
+    // node (`confirmation_matches`: trimmed, then exact).
     pub(crate) fn confirm(self, typed: &str) -> Result<PreparedOperation, ConfirmError> {
         let (baseline, _) = selected(&self.state);
         if !confirmation_matches(typed, &baseline.device) {
             return Err(ConfirmError::Mismatch);
         }
 
+        self.into_prepared()
+    }
+
+    // Accepts the user's explicit approval of `request()` as shown (a GUI's
+    // button). It can only be given here, to a pending confirmation, and it
+    // continues exactly as a matching typed confirmation does.
+    pub(crate) fn approve(self) -> Result<PreparedOperation, ConfirmError> {
+        self.into_prepared()
+    }
+
+    // The human confirmation was given: freezes what was confirmed --
+    // target, selection, image, Verify mode -- into a `WriteIntent` and a
+    // `ConfirmationToken`, which never leave the returned
+    // `PreparedOperation`.
+    fn into_prepared(self) -> Result<PreparedOperation, ConfirmError> {
         let intent =
             WriteIntent::from_selection(&self.state, self.image.selection(), self.verify_mode)
                 .map_err(ConfirmError::Intent)?;
@@ -435,11 +449,9 @@ pub(super) fn run_on(
         Err(CancelledBeforeConfirmation) => return Cancelled(CancelledAt::BeforeConfirmation),
     };
 
-    let operation = match observer.request_confirmation(&pending.request()) {
-        ConfirmationDecision::Submitted(typed) => match pending.confirm(&typed) {
-            Ok(operation) => operation,
-            Err(error) => return Failed(OperationError::Confirmation(error)),
-        },
+    let confirmed = match observer.request_confirmation(&pending.request()) {
+        ConfirmationDecision::Submitted(typed) => pending.confirm(&typed),
+        ConfirmationDecision::Approved => pending.approve(),
         ConfirmationDecision::InputClosed => {
             return Failed(OperationError::ConfirmationInputClosed);
         }
@@ -447,6 +459,10 @@ pub(super) fn run_on(
             return Failed(OperationError::ConfirmationInputFailed(error));
         }
         ConfirmationDecision::Cancelled => return Cancelled(CancelledAt::Confirmation),
+    };
+    let operation = match confirmed {
+        Ok(operation) => operation,
+        Err(error) => return Failed(OperationError::Confirmation(error)),
     };
     observer.on_event(OperationEvent::Confirmed(operation.confirmed()));
 
@@ -815,6 +831,59 @@ mod tests {
                 Err(other) => panic!("{typed:?}: {other:?}"),
             }
         }
+    }
+
+    // An explicit approval is the other way to confirm: it is given to a
+    // pending confirmation (there is no other way to call it) and freezes
+    // exactly what a matching typed answer freezes.
+    #[test]
+    fn an_approval_confirms_what_a_matching_typed_answer_confirms() {
+        let image = temp_image("approve", "img", &payload());
+        let pending = |verify_mode| {
+            let platform = ScriptedPlatform::new(vec![found(usb_stick()), found(usb_stick())]);
+            let cancel = CancelHandle::new();
+            prepare(&platform, &image, verify_mode, &cancel)
+                .unwrap()
+                .request_confirmation(&cancel)
+                .unwrap()
+        };
+        for verify_mode in [VerifyMode::None, VerifyMode::Quick, VerifyMode::Full] {
+            let approved = pending(verify_mode).approve().unwrap();
+            let typed = pending(verify_mode).confirm("/dev/sdx").unwrap();
+            let (approved, typed) = (approved.confirmed(), typed.confirmed());
+            assert_eq!(approved.target_block_path, typed.target_block_path);
+            assert_eq!(approved.image_size, typed.image_size);
+            assert_eq!(approved.verify_mode, typed.verify_mode);
+            assert_eq!(approved.verify_mode, verify_mode);
+        }
+    }
+
+    // An inspection is only a description: the operation opens the image
+    // itself, so a file changed after it was inspected is prepared as it is
+    // now (and its own Source Identity starts from that open).
+    #[test]
+    fn an_inspection_is_not_what_the_operation_uses() {
+        use std::io::Write as _;
+        let data = payload();
+        let image = temp_image("inspect-then-change", "img", &data);
+        let inspected = super::super::image::inspect_image(&image.0).unwrap();
+        assert_eq!(inspected.logical_size(), Some(data.len() as u64));
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&image.0)
+            .unwrap()
+            .write_all(b"appended after inspection")
+            .unwrap();
+
+        let platform = ScriptedPlatform::new(vec![found(usb_stick()), found(usb_stick())]);
+        let cancel = CancelHandle::new();
+        let prepared = prepare(&platform, &image, VerifyMode::Full, &cancel).unwrap();
+        assert_eq!(
+            prepared.logical_size(),
+            std::fs::metadata(&image.0).unwrap().len()
+        );
+        assert_ne!(Some(prepared.logical_size()), inspected.logical_size());
     }
 
     // 21.3: a target that changed during Preflight is refused before any
@@ -1358,6 +1427,58 @@ mod tests {
         assert!(platform.opens().is_empty());
     }
 
+    // An approved operation takes the same second half as a typed one: the
+    // fresh Write Gate still refuses a target that changed after the
+    // confirmation (nothing is opened), and an unchanged one is written and
+    // verified in full.
+    #[test]
+    fn an_approved_operation_still_passes_the_fresh_gate() {
+        let image = temp_image("approve-gate", "img", &payload());
+        let target = target_file("approve-gate");
+        let platform = ScriptedPlatform::with_device(
+            vec![found(usb_stick()), found(usb_stick()), found(recreated())],
+            device(&target),
+        );
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::None,
+            &CancelHandle::new(),
+            &mut TestObserver::deciding(ConfirmationDecision::Approved),
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::WriteGate(WriteGateError::InstanceRecreated))
+        ));
+        assert!(platform.opens().is_empty());
+        assert!(contents(&target).is_empty());
+
+        let target = target_file("approve-run");
+        let platform = ScriptedPlatform::with_device(snapshots(false, true), device(&target));
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::Full,
+            &CancelHandle::new(),
+            &mut TestObserver::deciding(ConfirmationDecision::Approved),
+        );
+        assert!(
+            matches!(
+                outcome,
+                OperationOutcome::Completed {
+                    verify: crate::execution::write_job::VerifySucceeded { skipped: false, .. },
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(contents(&target), payload());
+        assert_eq!(
+            platform.opens(),
+            vec![OpenAccess::WriteExclusive, OpenAccess::ReadOnlyDirect]
+        );
+    }
+
     // 26.10: an OpenDevice failure keeps OpenDevice's own error, and the
     // Write Gate's verdict on it.
     #[test]
@@ -1686,6 +1807,7 @@ mod tests {
             "image.request_confirmation(cancel)",
             "observer.request_confirmation(&pending.request())",
             "pending.confirm(&typed)",
+            "pending.approve()",
             "platform.fetch_snapshot(operation.target_block_path())",
             "operation.fresh_gate(refreshed)",
             "platform.open_device(&ready.current().block_path, OpenAccess::WriteExclusive)",

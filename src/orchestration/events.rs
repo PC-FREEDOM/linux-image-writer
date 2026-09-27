@@ -7,8 +7,10 @@
 //     the data a caller needs to show progress, borrowed for the duration of
 //     the call; nothing in them can be used to act on the device.
 //   - `request_confirmation`: the human confirmation. The observer shows the
-//     request and returns what the user typed (or why there is no answer);
-//     whether it matches is decided by the operation, never by the observer.
+//     request and returns what the user typed, or that the user explicitly
+//     approved it (a GUI's button), or why there is no answer; whether a
+//     typed answer matches is decided by the operation, never by the
+//     observer.
 //
 // Events and the observer are synchronous and carry no `Send` bound: the
 // operation runs on the caller's thread, and a GUI is expected to run the
@@ -116,13 +118,27 @@ pub(crate) enum OperationEvent<'a> {
     VerifyProgress(VerifyProgress),
 }
 
-// The observer's answer to a confirmation request.
+// The observer's answer to a confirmation request. `Submitted` and
+// `Approved` are the two ways a human confirms (the CLI's typed text, a
+// GUI's button); either one is only an answer to the request that was
+// shown, and either one continues through the same WriteIntent,
+// ConfirmationToken and Write Gate.
 /// The answer to a confirmation request: what the user typed (compared by the
-/// operation), or why there is none.
+/// operation), the user's explicit approval of the request as shown, or why
+/// there is no answer.
 #[derive(Debug)]
 pub enum ConfirmationDecision {
     // What the user typed, as entered; the operation compares it.
     Submitted(String),
+    // The user was shown this request and explicitly approved it (e.g. a
+    // "Write to USB" button in the final confirmation). Not "no
+    // confirmation needed": it answers only the pending request.
+    // Given by the library's users (a GUI); the CLI binary asks for typed
+    // text and never builds it.
+    /// The user was shown the pending request and explicitly approved it
+    /// (e.g. a GUI's "Write" button). It answers that request only.
+    #[allow(dead_code)]
+    Approved,
     // There will be no answer (e.g. the input was closed).
     InputClosed,
     // Reading the answer failed.

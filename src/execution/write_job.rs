@@ -531,6 +531,17 @@ pub struct AuthorizedExecution {
     image: SelectedImage,
 }
 
+// Whether an image with this access can be verified in `mode`: Quick
+// Verify reads sampled windows at arbitrary offsets, so it needs a
+// random-access source; None and Full work with any source. The one rule
+// for this, used where it is enforced (`AuthorizedExecution::bind`, and the
+// refusal of Quick for a compressed image before Preflight) and where it is
+// shown (image inspection). It says nothing about whether the target's
+// direct (O_DIRECT) reads will work at run time.
+pub(crate) fn verify_mode_supported(mode: VerifyMode, access: ImageSourceAccess) -> bool {
+    mode != VerifyMode::Quick || access == ImageSourceAccess::RandomAccess
+}
+
 impl AuthorizedExecution {
     // Checks `image_generation` first (the real identity判定) and only then
     // `image_size` (defense-in-depth, see `ImageBindingError`'s doc
@@ -549,9 +560,7 @@ impl AuthorizedExecution {
             return Err(ImageBindingError::SizeMismatch);
         }
 
-        if authorized.verify_mode() == VerifyMode::Quick
-            && image.access() != ImageSourceAccess::RandomAccess
-        {
+        if !verify_mode_supported(authorized.verify_mode(), image.access()) {
             return Err(ImageBindingError::QuickVerifyUnsupported);
         }
 
@@ -1860,6 +1869,26 @@ mod tests {
     use crate::identity::{IdentityComparison, InstanceComparison};
     use crate::image_source::{FileImageSource, ImageSource, ImageSourceAccess};
     use std::io::Cursor;
+
+    // The one Verify rule: only Quick needs random access.
+    #[test]
+    fn only_quick_verify_needs_random_access() {
+        use ImageSourceAccess::{RandomAccess as Random, SequentialReplay as Sequential};
+        for (mode, access, supported) in [
+            (VerifyMode::None, Random, true),
+            (VerifyMode::None, Sequential, true),
+            (VerifyMode::Full, Random, true),
+            (VerifyMode::Full, Sequential, true),
+            (VerifyMode::Quick, Random, true),
+            (VerifyMode::Quick, Sequential, false),
+        ] {
+            assert_eq!(
+                verify_mode_supported(mode, access),
+                supported,
+                "{mode:?} {access:?}"
+            );
+        }
+    }
 
     fn base_device(size: u64) -> DeviceSnapshot {
         DeviceSnapshot {

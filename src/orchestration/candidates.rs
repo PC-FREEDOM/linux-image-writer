@@ -92,6 +92,15 @@ impl TargetRef {
         &self.block_path
     }
 
+    // The snapshot a listed reference was built from; `None` for a bare
+    // block path.
+    fn listed(&self) -> Option<&DeviceSnapshot> {
+        match &self.origin {
+            TargetOrigin::Listed(listed) => Some(listed),
+            TargetOrigin::BlockPathOnly => None,
+        }
+    }
+
     pub(crate) fn check_against(&self, current: &DeviceSnapshot) -> TargetCheck {
         let listed = match &self.origin {
             TargetOrigin::BlockPathOnly => return TargetCheck::Unverified,
@@ -164,6 +173,10 @@ pub struct DeviceCandidate {
     display: DeviceDisplay,
     assessment: SafetyAssessment,
     selectability: Selectability,
+    // Copies of the snapshot's instance values, for display.
+    diskseq: Option<u64>,
+    major: u32,
+    minor: u32,
 }
 
 // Part of the library's Production API; unused by the CLI binary.
@@ -188,6 +201,34 @@ impl DeviceCandidate {
     /// Whether this device can be selected, and if not, why.
     pub fn selectability(&self) -> &Selectability {
         &self.selectability
+    }
+
+    // The same comparison the operation makes when it starts
+    // (`TargetRef::check_against`: Identity `Same` and instance
+    // `SameInstance`), made between `target`'s listed snapshot and this
+    // entry's. It only tells a UI whether to keep showing `target` as
+    // selected after a refresh; the operation still re-reads and
+    // re-verifies the device itself, whatever this said.
+    /// Whether this entry is the same device, and the same instance of it,
+    /// as `target` was when it was listed: what a UI needs to keep a
+    /// selection across a refresh of the list. Never a path-only match. For
+    /// display decisions only; the operation re-verifies the device itself.
+    pub fn is_same_device_as(&self, target: &TargetRef) -> bool {
+        match self.target.listed() {
+            Some(current) => target.check_against(current) == TargetCheck::Unchanged,
+            None => false,
+        }
+    }
+
+    /// The kernel's disk sequence number for this block-device instance
+    /// (`None` when the system does not report one), for display.
+    pub fn diskseq(&self) -> Option<u64> {
+        self.diskseq
+    }
+
+    /// The block device's `(major, minor)` numbers, for display.
+    pub fn major_minor(&self) -> (u32, u32) {
+        (self.major, self.minor)
     }
 }
 
@@ -246,6 +287,7 @@ fn candidate_from_snapshot(snapshot: DeviceSnapshot) -> DeviceCandidate {
     let assessment = assess_device(&snapshot);
     let selectability = core::selectability(&snapshot, &assessment);
     let display = DeviceDisplay::from_snapshot(&snapshot);
+    let (diskseq, major, minor) = (snapshot.diskseq, snapshot.major, snapshot.minor);
 
     DeviceCandidate {
         target: TargetRef {
@@ -255,6 +297,9 @@ fn candidate_from_snapshot(snapshot: DeviceSnapshot) -> DeviceCandidate {
         display,
         assessment,
         selectability,
+        diskseq,
+        major,
+        minor,
     }
 }
 
@@ -603,6 +648,68 @@ mod tests {
             TargetRef::from_block_path(usb_stick().block_path).check_against(&replaced),
             TargetCheck::Unverified
         );
+    }
+
+    // A refreshed entry is the held reference's device only when the same
+    // comparison the operation uses says Same + SameInstance: never by block
+    // path, model, serial or size alone.
+    #[test]
+    fn a_refreshed_entry_matches_a_held_target_only_as_the_operation_would() {
+        let held = candidate_from_snapshot(usb_stick()).target().clone();
+        type Edit = fn(&mut DeviceSnapshot);
+        let edits: [(Edit, bool); 8] = [
+            (|_| {}, true),
+            // A new instance at the same path (re-plugged, media swapped).
+            (|s| s.diskseq = Some(13), false),
+            (|s| s.diskseq = None, false),
+            // Another device that took over the same path.
+            (|s| s.serial = "OTHER-SERIAL".to_string(), false),
+            (|s| s.serial = String::new(), false),
+            (
+                |s| s.block_path = "/org/freedesktop/UDisks2/block_devices/sdy".to_string(),
+                false,
+            ),
+            // Size is identity evidence (`compare_identity`).
+            (|s| s.size = 16_000_000_000, false),
+            // A Safety-relevant change on the same device and instance does
+            // not make it another device (the operation judges Safety afresh
+            // when it starts).
+            (
+                |s| s.mount_points = vec!["/media/user/STICK".to_string()],
+                true,
+            ),
+        ];
+
+        for (edit, expected) in edits {
+            let mut current = usb_stick();
+            edit(&mut current);
+            let refreshed = candidate_from_snapshot(current.clone());
+            assert_eq!(refreshed.is_same_device_as(&held), expected);
+            // Exactly the operation's own check.
+            assert_eq!(
+                refreshed.is_same_device_as(&held),
+                held.check_against(&current) == TargetCheck::Unchanged
+            );
+        }
+
+        // A bare block path has nothing to compare with: never the same.
+        let bare = TargetRef::from_block_path(usb_stick().block_path);
+        assert!(!candidate_from_snapshot(usb_stick()).is_same_device_as(&bare));
+    }
+
+    #[test]
+    fn a_candidate_shows_its_instance_values() {
+        let candidate = candidate_from_snapshot(usb_stick());
+        assert_eq!(candidate.diskseq(), Some(12));
+        assert_eq!(candidate.major_minor(), (8, 0));
+
+        let mut unknown = usb_stick();
+        unknown.diskseq = None;
+        unknown.major = 259;
+        unknown.minor = 3;
+        let candidate = candidate_from_snapshot(unknown);
+        assert_eq!(candidate.diskseq(), None);
+        assert_eq!(candidate.major_minor(), (259, 3));
     }
 
     // Selecting a listed target refuses a changed device before asking

@@ -2,9 +2,18 @@
 // image `image_source::open_image` already opened into the source the write
 // pipeline reads from. Moved unchanged from `main.rs` (Phase 3A-1); the
 // target-side re-check after Preflight stays with its caller.
+//
+// Also image inspection (`inspect_image`): what an image is, for a UI to
+// show before any operation, classified by the same `open_image` and judged
+// by the same Verify rule the write uses.
+
+use std::path::Path;
 
 use crate::execution::core;
-use crate::image_source;
+use crate::execution::write_job::verify_mode_supported;
+use crate::image_source::{
+    self, CompressionFormat, ImageSource, ImageSourceAccess, ImageSourceError,
+};
 
 // Why a compressed image was not accepted for writing. Every case stops
 // before the target is opened.
@@ -33,7 +42,7 @@ pub(crate) fn prepare_compressed_image(
     is_cancelled: impl FnMut() -> bool,
     on_progress: impl FnMut(image_source::compressed::PreflightProgress),
 ) -> Result<image_source::compressed::CompressedImageSource, CompressedImageRejection> {
-    if verify_mode == core::VerifyMode::Quick {
+    if !verify_mode_supported(verify_mode, compressed.access()) {
         return Err(CompressedImageRejection::QuickVerifyUnsupported(
             compressed.format(),
         ));
@@ -51,6 +60,117 @@ pub(crate) fn prepare_compressed_image(
     Ok(image_source::compressed::CompressedImageSource::new(
         preflighted,
     ))
+}
+
+// ---- Inspection: what an image is, before any operation ----
+
+// A read-only description of an image file for a UI: opened, classified and
+// closed again by `inspect_image`. It holds no file, source or selection and
+// nothing accepts it -- a write opens the image itself and applies Source
+// Identity from its own open, so nothing here vouches for the file later.
+/// What an image file is, as a write would classify it: for display before
+/// an operation. It grants nothing and is never used by the operation, which
+/// opens and checks the image itself when it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageInfo {
+    file_size: u64,
+    compression: Option<CompressionFormat>,
+    access: ImageSourceAccess,
+    logical_size: Option<u64>,
+}
+
+/// How an image's data can be read back, as far as its format allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageAccess {
+    /// Any offset can be read directly (an uncompressed image).
+    RandomAccess,
+    /// The data can only be replayed from its start (a gzip or xz image).
+    SequentialReplay,
+}
+
+/// Whether a [`VerifyMode`](crate::VerifyMode) can be used with an image's
+/// format. It does not promise that Verify will succeed on a particular
+/// device: whether its direct (O_DIRECT) reads work is only known when
+/// Verify starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyAvailability {
+    Available,
+    Unavailable(VerifyUnavailableReason),
+}
+
+/// Why a Verify mode cannot be used with an image's format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyUnavailableReason {
+    /// The mode reads sampled windows at arbitrary offsets (Quick), and the
+    /// image can only be replayed from its start.
+    NeedsRandomAccess,
+}
+
+// Part of the library's Production API; unused by the CLI binary.
+#[allow(dead_code)]
+impl ImageInfo {
+    /// The size of the file itself (for a compressed image, the compressed
+    /// size).
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    /// The compression detected from the file's content (never its name);
+    /// `None` for an uncompressed image.
+    pub fn compression(&self) -> Option<CompressionFormat> {
+        self.compression
+    }
+
+    /// How the image's data can be read back.
+    pub fn access(&self) -> ImageAccess {
+        match self.access {
+            ImageSourceAccess::RandomAccess => ImageAccess::RandomAccess,
+            ImageSourceAccess::SequentialReplay => ImageAccess::SequentialReplay,
+        }
+    }
+
+    /// The number of bytes that would be written, when it is known without
+    /// decoding: an uncompressed image's size. `None` for a compressed
+    /// image, whose size is only established by the operation's full
+    /// validation (Preflight).
+    pub fn logical_size(&self) -> Option<u64> {
+        self.logical_size
+    }
+
+    /// Whether `mode` can be used with this image's format, by the same
+    /// rule the operation enforces.
+    pub fn verify_availability(&self, mode: core::VerifyMode) -> VerifyAvailability {
+        if verify_mode_supported(mode, self.access) {
+            VerifyAvailability::Available
+        } else {
+            VerifyAvailability::Unavailable(VerifyUnavailableReason::NeedsRandomAccess)
+        }
+    }
+}
+
+// Opens the image once with `open_image` -- the same classification by
+// content (and the same refusals) the write uses -- reads what it found and
+// closes it. A compressed image is not decoded: its logical size stays
+// unknown until an operation's Preflight.
+/// Describes the image at `path` for display: its format, size, access and
+/// which Verify modes its format allows. Read-only; an unsupported or
+/// unreadable file is the same error the write operation would report.
+#[allow(dead_code)]
+pub fn inspect_image(path: impl AsRef<Path>) -> Result<ImageInfo, ImageSourceError> {
+    Ok(match image_source::open_image(path.as_ref())? {
+        image_source::OpenedImage::Raw(source) => ImageInfo {
+            file_size: source.logical_size(),
+            compression: None,
+            access: source.access(),
+            logical_size: Some(source.logical_size()),
+        },
+        image_source::OpenedImage::Compressed(compressed) => ImageInfo {
+            file_size: compressed.compressed_size(),
+            compression: Some(compressed.format()),
+            access: compressed.access(),
+            logical_size: None,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -507,5 +627,152 @@ mod tests {
             matches!(result, Err(CompressedImageRejection::SourceChanged(_))),
             "{result:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Inspection: the same classification as `open_image`, and the same
+    // Verify rule the write enforces.
+    // ---------------------------------------------------------------------
+
+    mod inspection {
+        use super::super::{
+            ImageAccess, VerifyAvailability, VerifyUnavailableReason, inspect_image,
+        };
+        use super::{CompressedImageRejection, prepare_compressed_image};
+        use crate::execution::core::VerifyMode;
+        use crate::image_source::{
+            CompressionFormat, ImageSourceError, OpenedImage, UnsupportedCompression, open_image,
+        };
+        use crate::orchestration::test_support::{gzip, payload, temp_image, xz};
+
+        const MODES: [VerifyMode; 3] = [VerifyMode::None, VerifyMode::Quick, VerifyMode::Full];
+
+        #[test]
+        fn a_raw_image_is_described_from_its_one_open() {
+            let data = payload();
+            let image = temp_image("inspect-raw", "img", &data);
+            let info = inspect_image(&image.0).unwrap();
+
+            assert_eq!(info.file_size(), data.len() as u64);
+            assert_eq!(info.compression(), None);
+            assert_eq!(info.access(), ImageAccess::RandomAccess);
+            assert_eq!(info.logical_size(), Some(data.len() as u64));
+            for mode in MODES {
+                assert_eq!(
+                    info.verify_availability(mode),
+                    VerifyAvailability::Available
+                );
+            }
+            assert!(matches!(open_image(&image.0), Ok(OpenedImage::Raw(_))));
+        }
+
+        // A compressed image is recognised by content, not decoded: its
+        // logical size stays unknown, and Quick is unavailable -- the same
+        // answer the write gives when it refuses Quick before Preflight.
+        #[test]
+        fn a_compressed_image_is_described_without_decoding() {
+            let data = payload();
+            for (format, bytes, extension) in [
+                (CompressionFormat::Gzip, gzip(&data), "img.gz"),
+                (CompressionFormat::Xz, xz(&data), "img.xz"),
+            ] {
+                let image = temp_image("inspect-compressed", extension, &bytes);
+                let info = inspect_image(&image.0).unwrap();
+
+                assert_eq!(info.file_size(), bytes.len() as u64);
+                assert_eq!(info.compression(), Some(format));
+                assert_eq!(info.access(), ImageAccess::SequentialReplay);
+                assert_eq!(info.logical_size(), None);
+                assert_eq!(
+                    info.verify_availability(VerifyMode::Quick),
+                    VerifyAvailability::Unavailable(VerifyUnavailableReason::NeedsRandomAccess)
+                );
+
+                for mode in MODES {
+                    let Ok(OpenedImage::Compressed(compressed)) = open_image(&image.0) else {
+                        panic!("{format:?} must open as compressed");
+                    };
+                    assert_eq!(compressed.format(), format);
+                    let prepared =
+                        prepare_compressed_image(compressed, mode, u64::MAX, || false, |_| {});
+                    let refused = matches!(
+                        prepared,
+                        Err(CompressedImageRejection::QuickVerifyUnsupported(refused))
+                            if refused == format
+                    );
+                    assert_eq!(
+                        refused,
+                        info.verify_availability(mode) != VerifyAvailability::Available,
+                        "{format:?} {mode:?}"
+                    );
+                    if !refused {
+                        assert!(prepared.is_ok(), "{format:?} {mode:?}");
+                    }
+                }
+            }
+        }
+
+        // Refusals are `open_image`'s own, unchanged.
+        #[test]
+        fn refusals_are_the_writes_own() {
+            let cases: [(&[u8], UnsupportedCompression); 5] = [
+                (
+                    &[0x28, 0xB5, 0x2F, 0xFD, 0, 0],
+                    UnsupportedCompression::Zstd,
+                ),
+                (b"BZh91AY", UnsupportedCompression::Bzip2),
+                (&[0x50, 0x4B, 0x03, 0x04, 0, 0], UnsupportedCompression::Zip),
+                (
+                    &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C],
+                    UnsupportedCompression::SevenZip,
+                ),
+                (&[0x04, 0x22, 0x4D, 0x18, 0, 0], UnsupportedCompression::Lz4),
+            ];
+            for (bytes, kind) in cases {
+                let image = temp_image("inspect-unsupported", "img", bytes);
+                assert!(
+                    matches!(
+                        inspect_image(&image.0),
+                        Err(ImageSourceError::UnsupportedFormat(found)) if found == kind
+                    ),
+                    "{kind:?}"
+                );
+                assert!(matches!(
+                    open_image(&image.0),
+                    Err(ImageSourceError::UnsupportedFormat(found)) if found == kind
+                ));
+            }
+
+            // A name promising a compression the content does not have.
+            let data = payload();
+            for (bytes, extension, expected) in [
+                (data.clone(), "img.gz", CompressionFormat::Gzip),
+                (gzip(&data), "img.xz", CompressionFormat::Xz),
+            ] {
+                let image = temp_image("inspect-mismatch", extension, &bytes);
+                assert!(matches!(
+                    inspect_image(&image.0),
+                    Err(ImageSourceError::ExtensionMismatch { expected: found }) if found == expected
+                ));
+                assert!(matches!(
+                    open_image(&image.0),
+                    Err(ImageSourceError::ExtensionMismatch { expected: found }) if found == expected
+                ));
+            }
+
+            // Not a regular file; a missing file.
+            let directory = std::env::temp_dir();
+            assert!(matches!(
+                inspect_image(&directory),
+                Err(ImageSourceError::NotRegularFile)
+            ));
+            let missing = temp_image("inspect-missing", "img", b"");
+            let missing_path = missing.0.clone();
+            drop(missing);
+            assert!(matches!(
+                inspect_image(&missing_path),
+                Err(ImageSourceError::Io(_))
+            ));
+        }
     }
 }

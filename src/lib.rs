@@ -5,15 +5,20 @@
 //! What a caller (a GUI) can do is exactly this:
 //!
 //! 1. [`list_candidates`] -- the devices, each with the Safety Engine's
-//!    assessment and whether it can be selected;
+//!    assessment and whether it can be selected; after a refresh,
+//!    [`DeviceCandidate::is_same_device_as`] tells whether an entry is
+//!    still the device (and instance) a held reference was listed as;
 //! 2. take a candidate's opaque [`TargetRef`];
-//! 3. build a [`WriteOperationRequest`] (target, image path, [`VerifyMode`]);
-//! 4. [`spawn_write_worker`] -- the whole operation runs on its own thread;
-//! 5. receive owned [`WorkerMessage`]s: events, one
+//! 3. [`inspect_image`] -- what the chosen image is and which
+//!    [`VerifyMode`]s its format allows (for display only);
+//! 4. build a [`WriteOperationRequest`] (target, image path, [`VerifyMode`]);
+//! 5. [`spawn_write_worker`] -- the whole operation runs on its own thread;
+//! 6. receive owned [`WorkerMessage`]s: events, one
 //!    [`WorkerConfirmationRequest`], and finally the [`OperationOutcome`];
-//! 6. answer the confirmation with what the user typed
-//!    ([`ConfirmationDecision`]); the operation decides whether it matches;
-//! 7. cancel through the worker at any time ([`CancelHandle`]).
+//! 7. answer the confirmation ([`ConfirmationDecision`]): the user's
+//!    explicit approval of the request as shown (`Approved`), or what the
+//!    user typed (`Submitted`, which the operation compares);
+//! 8. cancel through the worker at any time ([`CancelHandle`]).
 //!
 //! Everything the sequence is built from -- device snapshots used for
 //! decisions, the Safety Engine, selection and confirmation tokens, the
@@ -28,8 +33,8 @@
 //!
 //! ```no_run
 //! use linux_usb_writer::{
-//!     ConfirmationDecision, VerifyMode, WorkerMessage, WriteOperationRequest, list_candidates,
-//!     spawn_write_worker,
+//!     ConfirmationDecision, VerifyAvailability, VerifyMode, WorkerMessage, WriteOperationRequest,
+//!     inspect_image, list_candidates, spawn_write_worker,
 //! };
 //!
 //! let candidates = list_candidates().expect("device list");
@@ -37,17 +42,21 @@
 //!     .iter()
 //!     .find(|candidate| candidate.selectability().is_selectable())
 //!     .expect("a selectable device");
-//! let request =
-//!     WriteOperationRequest::new(candidate.target().clone(), "image.img", VerifyMode::Full);
+//! let image = inspect_image("image.img").expect("a supported image");
+//! let verify_mode = match image.verify_availability(VerifyMode::Quick) {
+//!     VerifyAvailability::Available => VerifyMode::Quick,
+//!     VerifyAvailability::Unavailable(_) => VerifyMode::Full,
+//! };
+//! let request = WriteOperationRequest::new(candidate.target().clone(), "image.img", verify_mode);
 //! let mut worker = spawn_write_worker(request).expect("worker thread");
 //! while let Some(message) = worker.recv() {
 //!     match message {
 //!         WorkerMessage::Event(_event) => { /* show progress */ }
-//!         WorkerMessage::ConfirmationRequested(request) => {
-//!             // Show `request` and ask the user to type `request.expected_text`.
-//!             let typed = String::new();
+//!         WorkerMessage::ConfirmationRequested(_request) => {
+//!             // Show `_request` (what will be written where); when the user
+//!             // clicks "Write", approve it.
 //!             worker
-//!                 .submit_confirmation(ConfirmationDecision::Submitted(typed))
+//!                 .submit_confirmation(ConfirmationDecision::Approved)
 //!                 .expect("a pending confirmation");
 //!         }
 //!         WorkerMessage::Finished(_outcome) => { /* show the result */ }
@@ -96,6 +105,36 @@
 //! }
 //! ```
 //!
+//! ```compile_fail,E0451
+//! // An image description is only produced by `inspect_image`.
+//! fn forge() -> linux_usb_writer::ImageInfo {
+//!     linux_usb_writer::ImageInfo {
+//!         file_size: 0,
+//!         compression: None,
+//!         access: todo!(),
+//!         logical_size: None,
+//!     }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0277
+//! // An image description is not an input to a write: a request names the
+//! // image by path, and the operation opens and checks it itself.
+//! fn request(
+//!     target: linux_usb_writer::TargetRef,
+//!     info: linux_usb_writer::ImageInfo,
+//! ) -> linux_usb_writer::WriteOperationRequest {
+//!     linux_usb_writer::WriteOperationRequest::new(target, info, linux_usb_writer::VerifyMode::Full)
+//! }
+//! ```
+//!
+//! ```compile_fail,E0599
+//! // Nor is it an image source: it cannot be read.
+//! fn read(info: &linux_usb_writer::ImageInfo) {
+//!     let _ = info.open_reader();
+//! }
+//! ```
+//!
 //! ```compile_fail,E0423
 //! // A selection generation (what a selection's authority rests on) cannot
 //! // be minted outside the crate, so a `SelectionState::Selected` cannot be
@@ -127,6 +166,11 @@ pub use orchestration::candidates::{
     CandidateListError, DeviceCandidate, DeviceDisplay, TargetRef, list_candidates,
 };
 pub use safety::{RiskLevel, RiskReason, SafetyAssessment};
+
+// ---- Image inspection (display only) ----
+pub use orchestration::image::{
+    ImageAccess, ImageInfo, VerifyAvailability, VerifyUnavailableReason, inspect_image,
+};
 
 // ---- Write request ----
 pub use execution::core::VerifyMode;

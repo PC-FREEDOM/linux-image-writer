@@ -19,9 +19,10 @@
 //
 // `WorkerEvent` / `WorkerConfirmationRequest` are owned copies of the
 // operation's borrowed `OperationEvent` / `ConfirmationRequest`: the data a
-// UI shows, with no capability of any kind. The typed confirmation text is
-// only passed along: the operation compares it (`confirm()`), not the UI and
-// not this module. `OperationOutcome` crosses as it is: it is owned data
+// UI shows, with no capability of any kind. The UI's answer -- its explicit
+// approval of the request as shown, or typed text -- is only passed along:
+// the operation acts on it (`approve()` / `confirm()`, which compares typed
+// text), not the UI and not this module. `OperationOutcome` crosses as it is: it is owned data
 // (the steps' own structured errors), with no image source, token, FD or
 // authorization in it.
 //
@@ -235,9 +236,12 @@ impl WorkerEvent {
 }
 
 // An owned copy of the operation's `ConfirmationRequest`: what the user
-// must be shown, and the text they must type. Showing it and returning what
-// was typed is all a UI does; the comparison is the operation's.
-/// What the user must be shown before writing, and the text they must type.
+// must be shown, and the text a typed confirmation must match. Showing it
+// and returning the user's answer is all a UI does; acting on the answer is
+// the operation's.
+/// What the user must be shown before writing. The user confirms it by
+/// explicitly approving it ([`ConfirmationDecision::Approved`]) or by typing
+/// `expected_text` ([`ConfirmationDecision::Submitted`]).
 #[derive(Debug, Clone)]
 pub struct WorkerConfirmationRequest {
     pub target: DeviceDisplay,
@@ -409,8 +413,9 @@ impl WriteWorker {
         }
     }
 
-    // Answers the pending confirmation with what the user typed (or why
-    // there is no answer). Only valid while `WaitingForConfirmation`.
+    // Answers the pending confirmation: the user's approval, what the user
+    // typed, or why there is no answer. Only valid while
+    // `WaitingForConfirmation`; any other time the decision is handed back.
     /// Answers the pending confirmation request.
     pub fn submit_confirmation(
         &mut self,
@@ -530,7 +535,7 @@ mod tests {
     use crate::device::SnapshotFetchOutcome;
     use crate::execution::core::WriteGateError;
     use crate::execution::linux_access::{OpenAccess, OpenDeviceError};
-    use crate::execution::write_job::VerifyFailureReason;
+    use crate::execution::write_job::{VerifyFailureReason, VerifySucceeded};
     use crate::orchestration::candidates::TargetRef;
 
     fn request(image: &TempImage, verify_mode: VerifyMode) -> WriteOperationRequest {
@@ -745,6 +750,73 @@ mod tests {
         assert!(!opened(&run.events, OpenPurpose::Write));
         assert!(std::fs::read(&target.0).unwrap().is_empty());
         assert_ended(worker, WorkerState::Failed);
+    }
+
+    // B2: a UI's explicit approval is only an answer to a pending request:
+    // sent before one was shown it is refused by the worker handle; given to
+    // the request, the operation continues through the same Write Gate,
+    // OpenDevice and FD binding, writes and verifies. An approval that
+    // arrives together with a cancellation loses to it.
+    #[test]
+    fn an_approval_answers_only_the_pending_request() {
+        let image = temp_image("worker-approve", "img", &payload());
+        let target = temp_image("worker-approve-target", "device", b"");
+        let mut worker = spawn_on(
+            ScriptedPlatform::with_device(snapshots(true), device(&target)),
+            request(&image, VerifyMode::Full),
+        )
+        .unwrap();
+        assert!(matches!(
+            worker.submit_confirmation(ConfirmationDecision::Approved),
+            Err(SubmitError::NotWaiting(ConfirmationDecision::Approved))
+        ));
+
+        let run = drive(&mut worker, |request| {
+            assert_eq!(request.block_path, usb_stick().block_path);
+            ConfirmationDecision::Approved
+        });
+        assert!(
+            matches!(
+                run.outcome,
+                OperationOutcome::Completed {
+                    verify: VerifySucceeded { skipped: false, .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            run.outcome
+        );
+        assert!(
+            run.events
+                .iter()
+                .any(|event| matches!(event, WorkerEvent::WriteGatePassed { .. }))
+        );
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            WorkerEvent::FdBound {
+                purpose: OpenPurpose::Write
+            }
+        )));
+        assert_eq!(std::fs::read(&target.0).unwrap(), payload());
+        assert_ended(worker, WorkerState::Completed);
+
+        let target = temp_image("worker-approve-cancel", "device", b"");
+        let mut worker = spawn_on(
+            ScriptedPlatform::with_device(snapshots(false), device(&target)),
+            request(&image, VerifyMode::None),
+        )
+        .unwrap();
+        let cancel = worker.cancel_handle();
+        let run = drive(&mut worker, move |_| {
+            cancel.request_cancel(CancelReason::UserRequested);
+            ConfirmationDecision::Approved
+        });
+        assert!(matches!(
+            run.outcome,
+            OperationOutcome::Cancelled(CancelledAt::Confirmation)
+        ));
+        assert!(std::fs::read(&target.0).unwrap().is_empty());
+        assert_ended(worker, WorkerState::Cancelled);
     }
 
     // C: a cancellation requested from the UI thread while the worker
