@@ -612,7 +612,7 @@ fn run_prepare_test(block_path: String) -> zbus::Result<()> {
 }
 
 // Simple, dependency-free human-readable size formatting for the Pre-write
-// Safety Summary in `run_write_test` below -- not a general-purpose
+// Safety Summary in `write-test` (`CliObserver`) -- not a general-purpose
 // formatting utility, just enough to show e.g. "8000000000 bytes
 // (7.45 GiB)" without adding a crate for it.
 fn format_size(bytes: u64) -> String {
@@ -807,8 +807,8 @@ fn install_cancel_handler(cancel: write_job::CancelHandle) -> Result<(), ctrlc::
 // Blocks on `stdin`. Returns `true` only if a line was actually read (the
 // user pressed Enter); `false` on EOF or an I/O error, mirroring the
 // existing Human Confirmation prompt's own `Ok(0) => false` / `Err(_) =>
-// false` treatment above in `run_write_test` -- the caller must never
-// proceed to Verify on `false`.
+// false` treatment (`CliObserver::request_confirmation`) -- the operation
+// never proceeds to Verify on `false`.
 fn pause_before_verify_for_test() -> bool {
     println!("write-test: TEST PAUSE (--test-pause-before-verify, test-only)");
     println!("write-test: write + sync are complete.");
@@ -831,94 +831,41 @@ fn pause_before_verify_for_test() -> bool {
     }
 }
 
-// PoC mode: Production execution path wiring (`cargo run -- write-test
-// <image-path> <block_path>`). This is the first CLI mode that connects the
-// full, real production path in one straight line: select -> re-verify ->
-// a *real* `SelectedImage` opened from `image_path` on disk (never the
-// synthetic `ImageSelection::new(fixed_size)` `prepare-test` uses) ->
-// WriteIntent -> confirm -> prepare_for_open -> OpenDevice -> FD binding ->
-// finalize_prepared_write -> AuthorizedWrite -> AuthorizedExecution::bind()
-// -> begin_write() -> WritingExecution::write() -> (on success only)
-// WriteSucceeded::begin_sync().sync(). None of Selection/Identity/Instance/
-// Safety/Confirmation/FD-binding is skipped -- this reuses exactly the same
-// `core`/`linux_access` calls `run_prepare_test` above already exercises,
-// it just does not stop at `AuthorizedWrite` and drop it.
+// `cargo run -- write-test <image-path> <block_path> [verify-mode]`: the
+// production write path, run through `orchestration::operation::
+// run_write_operation`, which owns the whole safe sequence (select ->
+// re-verify -> open the image once -> Preflight + target re-check for gzip /
+// xz -> typed confirmation -> WriteIntent / ConfirmationToken -> fresh Write
+// Gate -> OpenDevice(rw, O_EXCL) -> FD binding -> AuthorizedExecution ->
+// write -> sync -> Verify). None of Selection/Identity/Instance/Safety/
+// Confirmation/FD-binding is skipped, and nothing here can reorder it: this
+// function only
+//
+//   - wires Ctrl+C to the operation's `CancelHandle` (before anything else,
+//     so every existing cancel point of the operation is reachable),
+//   - prints what the operation reports and asks for the typed
+//     confirmation (`CliObserver`),
+//   - prints how it ended and turns that into the exit status
+//     (`print_write_test_outcome`, `write_test_exit`).
 //
 // `block_path` is a UDisks2 block object path, exactly like every other CLI
 // mode above (`select`/`open-test`/`prepare-test`) -- not a raw `/dev/sdX`
-// string accepted with no safety checks. `image_path` is opened by
-// `image_source::open_image()` exactly once; the source built from that
-// open file (a `FileImageSource` for a raw image, a `CompressedImageSource`
-// for a validated gzip or xz image) becomes the `SelectedImage`, held
-// inside `orchestration::operation`'s values, unchanged, from that point
-// until `operation.bind()` moves it into `AuthorizedExecution::bind()` -- it
-// is never re-opened, never reconstructed, and no second
-// source/`SelectedImage` is ever created for the same invocation.
-//
-// Still a linear CLI PoC, not a Controller: the first half (target, image,
-// confirmation) runs step by step through `orchestration::operation`, and
-// every other step happens in this one function, exactly like
-// `run_prepare_test`. If OpenDevice needs polkit
-// authentication, this program does nothing but wait for the reply; it
-// never falls back to sudo or any other bypass.
-//
-// Before reaching OpenDevice, this function also runs a Human Confirmation
-// step (see below): a Pre-write Safety Summary, a destructive-write warning,
-// and a prompt requiring the operator to type the target's `/dev` node
-// exactly. This is a second, independent layer on top of (not a
-// replacement for) `core::ConfirmationToken` -- the internal token still
-// exists and is still built and checked exactly as before, just after this
-// human step instead of before it. Everything that already re-verifies the
-// target immediately before OpenDevice (`collect_device_snapshot` +
-// `prepare_for_open`'s Identity/Instance/Safety re-check) is unchanged and,
-// as a consequence of where the human prompt is placed, now runs *after*
-// whatever time the operator took to read the summary and type the
-// confirmation -- not before it.
+// string accepted with no safety checks; it is passed as an unverified
+// block-path reference. If OpenDevice needs polkit authentication, this
+// program does nothing but wait for the reply; it never falls back to sudo
+// or any other bypass.
 fn run_write_test(
     image_path: String,
     block_path: String,
     verify_mode: core::VerifyMode,
     test_pause_before_verify: bool,
 ) -> zbus::Result<WriteTestExit> {
-    // The first half -- target, image, confirmation -- runs through
-    // `orchestration::operation`, one step at a time; everything this
-    // function prints or reads in between is unchanged. The CLI argument is
-    // an unverified block-path reference.
-    let platform = orchestration::platform::LinuxPlatform;
-    let target = orchestration::candidates::TargetRef::from_block_path(block_path.as_str());
-
-    let selected_target = match orchestration::operation::select_write_target(&platform, &target) {
-        Ok(selected_target) => {
-            print_selection_state(selected_target.state());
-            selected_target
-        }
-        Err(not_ready) => {
-            let state = match not_ready {
-                orchestration::operation::TargetNotReady::Select(error) => {
-                    print_select_error(&error, &block_path);
-                    core::SelectionState::NoSelection
-                }
-                orchestration::operation::TargetNotReady::NotReady(state) => state,
-            };
-            print_selection_state(&state);
-            println!("\nwrite-test: Selection invalid -- stopping before the Write Gate.");
-            return Ok(WriteTestExit::Completed);
-        }
-    };
-
-    // Cancel wiring (Ctrl+C -> CancelHandle): one shared handle, created and
-    // wired to Ctrl+C as soon as target selection has succeeded -- before
-    // the image is opened, so image preparation (including a compressed image's
-    // Preflight, which receives a `|| cancel.is_requested()` closure rather
-    // than the handle itself) is covered. Ctrl+C during argument parsing or
-    // device enumeration (above) keeps its ordinary "just terminate the
-    // process" behavior: nothing has been opened yet at that point. The
-    // same `cancel` is checked after the image is opened, watched during the
-    // Human Confirmation prompt, cloned into `begin_write()`, checked again
-    // after sync, and cloned into `begin_verify()` -- one Ctrl+C anywhere from here
-    // through the end of Verify is honored by whichever phase happens to be
-    // running. It is one-shot: there is no way to reset it, so a cancelled
-    // run can never continue.
+    // Cancel wiring (Ctrl+C -> CancelHandle): one shared handle, wired to
+    // Ctrl+C before the operation starts. The operation checks it only at
+    // its existing cancel points (during a compressed image's Preflight,
+    // after the image is prepared, during the confirmation prompt, per write
+    // chunk, after sync, before Verify, per Verify chunk). It is one-shot:
+    // there is no way to reset it, so a cancelled run can never continue.
     let cancel = write_job::CancelHandle::new();
 
     if let Err(error) = install_cancel_handler(cancel.clone()) {
@@ -929,714 +876,529 @@ fn run_write_test(
         return Ok(WriteTestExit::Completed);
     }
 
-    // The one and only place `image_path` is opened this invocation (inside
-    // `prepare_image`, see there). A gzip or xz image is validated end to
-    // end (Preflight) before anything else, with the decoded size bounded by
-    // the target's capacity, so the confirmation below shows the exact image
-    // size and an image that cannot be written is refused before the target
-    // is opened; the target is then re-verified before the confirmation.
-    //
-    // A refusal or failure returns `Completed`, exactly like the
-    // pre-existing image-open failure path; a cancellation during a
-    // compressed image's Preflight returns `Cancelled` (exit 130), like every
-    // other cancellation.
-    let image = match selected_target.prepare_image(
-        &platform,
-        &image_path,
+    let request = orchestration::operation::WriteOperationRequest {
+        target: orchestration::candidates::TargetRef::from_block_path(block_path.as_str()),
+        image_path: image_path.clone(),
         verify_mode,
-        &cancel,
-        |format| {
-            println!(
+    };
+    let mut observer = CliObserver {
+        image_path: &image_path,
+        cancel: cancel.clone(),
+        test_pause_before_verify,
+        write_cancel_notice_shown: false,
+        verify_cancel_notice_shown: false,
+        last_verify_total_bytes: 0,
+        expected_device: String::new(),
+    };
+
+    let outcome = orchestration::operation::run_write_operation(request, &cancel, &mut observer);
+
+    print_write_test_outcome(&outcome, &observer, &block_path);
+    Ok(write_test_exit(&outcome))
+}
+
+// The exit status `write-test` has always used: 130 (`Cancelled`) for a
+// cancellation at any point, and `Completed` for everything else --
+// including a refusal or a failure, which only the printed messages report
+// (unchanged in Phase 3A).
+fn write_test_exit(outcome: &orchestration::outcome::OperationOutcome) -> WriteTestExit {
+    if outcome.is_cancelled() {
+        WriteTestExit::Cancelled
+    } else {
+        WriteTestExit::Completed
+    }
+}
+
+// The CLI side of a write operation: prints every step exactly as
+// `write-test` always has, and asks for the typed confirmation on stdin.
+struct CliObserver<'a> {
+    image_path: &'a str,
+    cancel: write_job::CancelHandle,
+    test_pause_before_verify: bool,
+    // The progress callbacks are a convenient place to tell the user their
+    // Ctrl+C was seen, the *first* time it's observed -- but only a
+    // best-effort, early notice: it is never what decides whether the write
+    // or Verify actually stopped (that is the operation's outcome).
+    write_cancel_notice_shown: bool,
+    verify_cancel_notice_shown: bool,
+    // The last Verify `total_bytes` shown, so a Verify cancellation can be
+    // reported as "X of Y" (Quick's Y is its sampled total, not the image
+    // size).
+    last_verify_total_bytes: u64,
+    // The `/dev` node the confirmation asked for.
+    expected_device: String,
+}
+
+impl orchestration::events::OperationObserver for CliObserver<'_> {
+    fn on_event(&mut self, event: orchestration::events::OperationEvent<'_>) {
+        use orchestration::events::{OpenPurpose, OperationEvent};
+
+        match event {
+            OperationEvent::TargetSelected { state } => print_selection_state(state),
+            OperationEvent::CompressedImageDetected { format } => println!(
                 "write-test: detected format: {} (compressed image); validating it before writing (nothing is written yet)",
                 format.name()
-            )
-        },
-        |progress| println!("write-test: {}", format_preflight_progress(&progress)),
-    ) {
-        Ok(image) => image,
-        Err(orchestration::operation::PrepareImageError::CompressedImage(
-            CompressedImageRejection::Preflight(image_source::compressed::PreflightError::Cancelled),
-        )) => {
-            for line in format_cancelled_before_confirmation() {
-                println!("write-test: {line}");
+            ),
+            OperationEvent::PreflightProgress(progress) => {
+                println!("write-test: {}", format_preflight_progress(&progress))
             }
-            return Ok(WriteTestExit::Cancelled);
-        }
-        Err(orchestration::operation::PrepareImageError::CompressedImage(rejection)) => {
-            for line in format_compressed_image_rejected(&rejection) {
-                println!("write-test: {line}");
+            OperationEvent::ImageSelected { image_size } => println!(
+                "\nwrite-test: image selected from {} (image_size={image_size} bytes)",
+                self.image_path
+            ),
+            OperationEvent::Confirmed(confirmed) => {
+                println!(
+                    "write-test: confirmation accepted for {}",
+                    self.expected_device
+                );
+                println!(
+                    "write-test: confirmation created for {} (image_size={} bytes, verify_mode={:?})",
+                    confirmed.target_block_path, confirmed.image_size, confirmed.verify_mode
+                );
             }
-            return Ok(WriteTestExit::Completed);
-        }
-        Err(orchestration::operation::PrepareImageError::TargetChanged(state)) => {
-            println!("write-test: the target changed while the image was being validated:");
-            print_selection_state(&state);
-            println!("write-test: stopping before confirmation; nothing was written.");
-            return Ok(WriteTestExit::Completed);
-        }
-        Err(orchestration::operation::PrepareImageError::Image(
-            error @ (image_source::ImageSourceError::UnsupportedFormat(_)
-            | image_source::ImageSourceError::ExtensionMismatch { .. }),
-        )) => {
-            for line in format_image_format_rejected(&error) {
-                println!("write-test: {line}");
+            OperationEvent::WriteGatePassed { plan } => println!(
+                "write-test: Write Gate (pre-open) passed. WritePlan: image_size={} target_size={} chunk_size={}",
+                plan.image_size, plan.target_size, plan.chunk_size
+            ),
+            OperationEvent::OpeningDevice {
+                purpose,
+                block_path,
+            } => {
+                match purpose {
+                    OpenPurpose::Write => {
+                        println!("write-test: requesting OpenDevice(mode=\"rw\") on {block_path}.")
+                    }
+                    OpenPurpose::Verify => println!(
+                        "write-test: requesting OpenDevice(mode=\"r\", O_DIRECT) on {block_path} for verification."
+                    ),
+                }
+                println!(
+                    "If a polkit authentication prompt appears, please complete it yourself -- \
+                     this program will not use sudo or any other privilege bypass."
+                );
             }
-            return Ok(WriteTestExit::Completed);
-        }
-        Err(orchestration::operation::PrepareImageError::Image(error)) => {
-            println!("write-test: failed to open image {image_path}: {error:?}");
-            return Ok(WriteTestExit::Completed);
-        }
-    };
-
-    println!(
-        "\nwrite-test: image selected from {image_path} (image_size={} bytes)",
-        image.logical_size()
-    );
-
-    // Ctrl+C may have arrived while the image was being opened; checked by
-    // `request_confirmation` before anything is shown.
-    let pending = match image.request_confirmation(&cancel) {
-        Ok(pending) => pending,
-        Err(orchestration::operation::CancelledBeforeConfirmation) => {
-            for line in format_cancelled_before_confirmation() {
-                println!("write-test: {line}");
+            OperationEvent::DeviceOpened {
+                purpose: OpenPurpose::Write,
+                metadata,
+            } => {
+                println!("write-test: OpenDevice: success");
+                if let Some(meta) = metadata {
+                    println!(
+                        "write-test: FD major:minor={}:{} size={:?} diskseq={:?}",
+                        meta.major, meta.minor, meta.size, meta.diskseq
+                    );
+                }
             }
-            return Ok(WriteTestExit::Cancelled);
+            OperationEvent::DeviceOpened {
+                purpose: OpenPurpose::Verify,
+                metadata,
+            } => {
+                println!("write-test: OpenDevice(mode=\"r\", O_DIRECT): success");
+                if let Some(meta) = metadata {
+                    println!(
+                        "write-test: verify FD major:minor={}:{} size={:?} diskseq={:?}",
+                        meta.major, meta.minor, meta.size, meta.diskseq
+                    );
+                }
+            }
+            OperationEvent::DeviceOpenFailed { purpose, error } => match purpose {
+                OpenPurpose::Write => println!("write-test: OpenDevice: failed ({error:?})"),
+                OpenPurpose::Verify => {
+                    println!("write-test: OpenDevice(mode=\"r\", O_DIRECT): failed ({error:?})")
+                }
+            },
+            // Reaching `FdBound` already proves `check_fd_binding` (core.rs)
+            // returned `FdBindingCheck::Match`.
+            OperationEvent::FdBound { purpose } => match purpose {
+                OpenPurpose::Write => println!("write-test: FD binding: Match"),
+                OpenPurpose::Verify => println!("write-test: verify FD binding: Match"),
+            },
+            OperationEvent::WriteAuthorized {
+                target_block_path,
+                target_size,
+                image_size,
+                verify_mode,
+            } => {
+                println!(
+                    "write-test: PreparedWrite established for {target_block_path} (target_size={target_size} image_size={image_size})"
+                );
+                println!("write-test: WRITE SESSION AUTHORIZED (verify_mode={verify_mode:?})");
+            }
+            OperationEvent::ImageBound => println!(
+                "write-test: AuthorizedExecution bound (image_generation/image_size match confirmed)"
+            ),
+            OperationEvent::WriteStarted => println!("write-test: write started"),
+            OperationEvent::WriteProgress(progress) => {
+                if self.cancel.is_requested() && !self.write_cancel_notice_shown {
+                    self.write_cancel_notice_shown = true;
+                    println!(
+                        "write-test: cancellation requested -- waiting for the current operation to stop safely."
+                    );
+                }
+                let percent = if progress.total_bytes > 0 {
+                    (progress.bytes_written as f64 / progress.total_bytes as f64) * 100.0
+                } else {
+                    100.0
+                };
+                println!(
+                    "write-test: progress {}/{} bytes ({percent:.1}%)",
+                    progress.bytes_written, progress.total_bytes
+                );
+            }
+            OperationEvent::WriteSucceeded {
+                bytes_written,
+                image_size,
+            } => println!(
+                "write-test: write succeeded ({bytes_written} of {image_size} bytes written)"
+            ),
+            OperationEvent::SyncStarted => println!("write-test: syncing..."),
+            OperationEvent::SyncOnCallingThread { error } => println!(
+                "write-test: could not start the sync worker thread ({error}); syncing on the main thread instead"
+            ),
+            OperationEvent::SyncSucceeded { bytes_written } => println!(
+                "write-test: sync succeeded -- write + sync completed ({bytes_written} bytes)"
+            ),
+            OperationEvent::VerifyPending { mode } => match mode {
+                core::VerifyMode::Quick => println!(
+                    "write-test: Quick verification checks selected regions only. It does not verify the entire image."
+                ),
+                core::VerifyMode::Full => {
+                    println!("write-test: Full verification reads back the entire written image.")
+                }
+                core::VerifyMode::None => unreachable!(
+                    "VerifyMode::None always produces VerifyStart::Skipped, never Pending"
+                ),
+            },
+            OperationEvent::VerifySnapshotRequested { block_path } => println!(
+                "write-test: requesting a fresh DeviceSnapshot for verification on {block_path}."
+            ),
+            // Verify Pre-flight Diagnostics: the same five-line summary the
+            // rejection path shows -- "Simple by default": always shown,
+            // never a full `DeviceSnapshot` dump.
+            OperationEvent::VerifyTargetChecked { diagnostics } => {
+                println!("write-test: verify target re-check: OK");
+                for line in format_verify_diagnostics_summary(diagnostics) {
+                    println!("write-test:   {line}");
+                }
+            }
+            OperationEvent::VerifyStarted => println!("write-test: verification started"),
+            OperationEvent::VerifyProgress(progress) => {
+                self.last_verify_total_bytes = progress.total_bytes;
+                if self.cancel.is_requested() && !self.verify_cancel_notice_shown {
+                    self.verify_cancel_notice_shown = true;
+                    println!(
+                        "write-test: cancellation requested -- waiting for the current operation to stop safely."
+                    );
+                }
+                let percent = if progress.total_bytes > 0 {
+                    (progress.verified_bytes as f64 / progress.total_bytes as f64) * 100.0
+                } else {
+                    100.0
+                };
+                println!(
+                    "write-test: verify progress {}/{} bytes ({percent:.1}%)",
+                    progress.verified_bytes, progress.total_bytes
+                );
+            }
         }
-    };
+    }
 
     // ---- Pre-write Safety Summary / Destructive Warning / Human Confirmation ----
-    // Shows the same re-verified selection and image the confirmation will
-    // be bound to -- no new device probe, no extra D-Bus call added just for
-    // this summary.
-    let request = pending.request();
-    println!("\nwrite-test: Pre-write Safety Summary");
-    println!("Target:");
-    println!("  Device:      {}", request.target.device);
-    println!(
-        "  Model:       {} {}",
-        request.target.vendor, request.target.model
-    );
-    println!("  Serial:      {}", request.target.serial);
-    println!("  Size:        {}", format_size(request.target.size));
-    println!("  Bus:         {}", request.target.connection_bus);
-    println!("  Removable:   {}", request.target.removable);
-    if request.target.mount_points.is_empty() {
-        println!("  Mounts:      none");
-    } else {
-        println!("  Mounts:      {}", request.target.mount_points.join(", "));
+    // Shows the re-verified selection and image the confirmation will be
+    // bound to, then reads one line. The operation compares it.
+    fn request_confirmation(
+        &mut self,
+        request: &orchestration::operation::ConfirmationRequest<'_>,
+    ) -> orchestration::events::ConfirmationDecision {
+        use orchestration::events::ConfirmationDecision;
+
+        println!("\nwrite-test: Pre-write Safety Summary");
+        println!("Target:");
+        println!("  Device:      {}", request.target.device);
+        println!(
+            "  Model:       {} {}",
+            request.target.vendor, request.target.model
+        );
+        println!("  Serial:      {}", request.target.serial);
+        println!("  Size:        {}", format_size(request.target.size));
+        println!("  Bus:         {}", request.target.connection_bus);
+        println!("  Removable:   {}", request.target.removable);
+        if request.target.mount_points.is_empty() {
+            println!("  Mounts:      none");
+        } else {
+            println!("  Mounts:      {}", request.target.mount_points.join(", "));
+        }
+        println!("  Risk:        {:?}", request.assessment.risk_level);
+        println!("  Writable:    {}", request.assessment.writable);
+        println!("  Reasons:     {:?}", request.assessment.reasons);
+        println!("  Block path:  {}", request.block_path);
+        println!("  DiskSeq:     {:?}", request.diskseq);
+        println!("Image:");
+        println!("  Path:        {}", self.image_path);
+        println!("  Size:        {}", format_size(request.image_size));
+        println!("Verification mode: {:?}", request.verify_mode);
+        println!();
+        println!("WARNING: Writing will overwrite the target device.");
+        println!("ALL EXISTING DATA ON THIS DEVICE MAY BE DESTROYED. This cannot be undone.");
+        println!();
+
+        self.expected_device = request.expected_text.to_string();
+        println!(
+            "Type the target device name exactly to continue: {}",
+            self.expected_device
+        );
+        print!("> ");
+        let _ = std::io::stdout().flush();
+
+        // stdin is read on a separate thread so a Ctrl+C here is noticed
+        // within `PROMPT_CANCEL_POLL_INTERVAL` instead of being swallowed by
+        // the `SA_RESTART`-restarted `read_line()` (see
+        // `install_cancel_handler`).
+        let cancel = &self.cancel;
+        let prompt_input = match spawn_prompt_reader() {
+            Ok(receiver) => wait_for_prompt_input(
+                &receiver,
+                || cancel.is_requested(),
+                PROMPT_CANCEL_POLL_INTERVAL,
+            ),
+            Err(error) => PromptInput::Error(error),
+        };
+
+        match prompt_input {
+            PromptInput::Line(input) => ConfirmationDecision::Submitted(input),
+            // EOF (e.g. stdin closed or redirected from an empty source):
+            // "no answer given", never an implicit yes.
+            PromptInput::Eof => ConfirmationDecision::InputClosed,
+            PromptInput::Error(error) => ConfirmationDecision::InputFailed(error),
+            PromptInput::Cancelled => ConfirmationDecision::Cancelled,
+        }
     }
-    println!("  Risk:        {:?}", request.assessment.risk_level);
-    println!("  Writable:    {}", request.assessment.writable);
-    println!("  Reasons:     {:?}", request.assessment.reasons);
-    println!("  Block path:  {}", request.block_path);
-    println!("  DiskSeq:     {:?}", request.diskseq);
-    println!("Image:");
-    println!("  Path:        {image_path}");
-    println!("  Size:        {}", format_size(request.image_size));
-    println!("Verification mode: {:?}", request.verify_mode);
-    println!();
-    println!("WARNING: Writing will overwrite the target device.");
-    println!("ALL EXISTING DATA ON THIS DEVICE MAY BE DESTROYED. This cannot be undone.");
-    println!();
 
-    let expected_device = request.expected_text.to_string();
-    println!("Type the target device name exactly to continue: {expected_device}");
-    print!("> ");
-    let _ = std::io::stdout().flush();
+    // TEST-ONLY (`--test-pause-before-verify`): see
+    // `pause_before_verify_for_test`. The write FD is already closed here,
+    // and Verify's fresh snapshot, re-check, OpenDevice and FD binding all
+    // still run afterward.
+    fn pause_before_verify(&mut self) -> bool {
+        !self.test_pause_before_verify || pause_before_verify_for_test()
+    }
+}
 
-    // stdin is read on a separate thread so a Ctrl+C here is noticed within
-    // `PROMPT_CANCEL_POLL_INTERVAL` instead of being swallowed by the
-    // `SA_RESTART`-restarted `read_line()` (see `install_cancel_handler`).
-    let prompt_input = match spawn_prompt_reader() {
-        Ok(receiver) => wait_for_prompt_input(
-            &receiver,
-            || cancel.is_requested(),
-            PROMPT_CANCEL_POLL_INTERVAL,
-        ),
-        Err(error) => PromptInput::Error(error),
+// How a `write-test` run ended, printed exactly as it always has been.
+fn print_write_test_outcome(
+    outcome: &orchestration::outcome::OperationOutcome,
+    observer: &CliObserver<'_>,
+    block_path: &str,
+) {
+    use orchestration::operation::{ConfirmError, PrepareImageError, TargetNotReady};
+    use orchestration::outcome::{CancelledAt, OperationError, OperationOutcome, VerifyNotStarted};
+
+    let identity_preserved = |image_size: u64| {
+        println!("write-test: SelectedImage identity preserved (image_size={image_size})")
+    };
+    let identity_preserved_after_verification = |image_size: u64| {
+        println!(
+            "write-test: SelectedImage identity preserved after verification (image_size={image_size})"
+        )
+    };
+    let confirmation_failed = || {
+        println!("write-test: confirmation failed; no device was opened and nothing was written")
+    };
+    let print_lines = |lines: Vec<String>| {
+        for line in lines {
+            println!("write-test: {line}");
+        }
     };
 
-    // `pending.confirm()` compares the typed line with the target's `/dev`
-    // node (`orchestration::confirmation_matches`) and only then freezes
-    // what was confirmed -- target, image, generation and `verify_mode`, the
-    // CLI's own choice (see the `write-test` dispatch in `main()`) -- into a
-    // `WriteIntent` and `ConfirmationToken`, which stay inside `operation`.
-    // `SyncSucceeded` (produced far below, after a successful write+sync)
-    // carries this exact `verify_mode` forward unchanged, which is what
-    // `SyncSucceeded::begin_verify()` branches on to decide None/Quick/Full.
-    let operation = match prompt_input {
-        PromptInput::Line(input) => match pending.confirm(&input) {
-            Ok(operation) => {
-                println!("write-test: confirmation accepted for {expected_device}");
-                operation
+    match outcome {
+        OperationOutcome::Completed { verify, image_size } => {
+            println!("write-test: {}", format_verify_succeeded(verify));
+            identity_preserved_after_verification(*image_size);
+        }
+
+        OperationOutcome::Cancelled(at) => match at {
+            CancelledAt::Preflight | CancelledAt::BeforeConfirmation => {
+                print_lines(format_cancelled_before_confirmation())
             }
-            Err(orchestration::operation::ConfirmError::Mismatch) => {
+            CancelledAt::Confirmation => {
+                println!();
+                print_lines(format_cancelled_before_confirmation());
+            }
+            CancelledAt::Write {
+                cancelled,
+                image_size,
+            } => {
+                print_lines(format_write_cancelled(cancelled));
                 println!(
-                    "write-test: confirmation failed; no device was opened and nothing was written"
+                    "write-test: not syncing -- retry_requires_fresh_gate={}",
+                    cancelled.retry_requires_fresh_gate
                 );
-                return Ok(WriteTestExit::Completed);
+                identity_preserved(*image_size);
             }
-            Err(orchestration::operation::ConfirmError::Intent(error)) => {
-                println!("write-test: confirmation accepted for {expected_device}");
-                println!("write-test: WriteIntent construction rejected: {error:?}");
-                return Ok(WriteTestExit::Completed);
+            CancelledAt::AfterSync => print_lines(format_cancelled_after_sync()),
+            CancelledAt::BeforeVerify => print_lines(format_verify_cancelled_before_start()),
+            CancelledAt::Verify {
+                cancelled,
+                image_size,
+            } => {
+                print_lines(format_verify_cancelled(
+                    cancelled,
+                    observer.last_verify_total_bytes,
+                ));
+                identity_preserved_after_verification(*image_size);
             }
         },
-        // EOF (e.g. stdin closed or redirected from an empty source): treat
-        // as "no answer given", never as an implicit yes.
-        PromptInput::Eof => {
-            println!(
-                "write-test: confirmation failed; no device was opened and nothing was written"
-            );
-            return Ok(WriteTestExit::Completed);
-        }
-        PromptInput::Error(error) => {
-            println!("write-test: failed to read the confirmation input: {error}");
-            println!(
-                "write-test: confirmation failed; no device was opened and nothing was written"
-            );
-            return Ok(WriteTestExit::Completed);
-        }
-        PromptInput::Cancelled => {
-            println!();
-            for line in format_cancelled_before_confirmation() {
-                println!("write-test: {line}");
+
+        OperationOutcome::Failed(error) => match error {
+            OperationError::Target(not_ready) => {
+                match not_ready {
+                    TargetNotReady::Select(error) => {
+                        print_select_error(error, block_path);
+                        print_selection_state(&core::SelectionState::NoSelection);
+                    }
+                    TargetNotReady::NotReady(state) => print_selection_state(state),
+                }
+                println!("\nwrite-test: Selection invalid -- stopping before the Write Gate.");
             }
-            return Ok(WriteTestExit::Cancelled);
-        }
-    };
-
-    let confirmed = operation.confirmed();
-    println!(
-        "write-test: confirmation created for {} (image_size={} bytes, verify_mode={:?})",
-        confirmed.target_block_path, confirmed.image_size, confirmed.verify_mode
-    );
-
-    let refreshed_for_gate = collect_device_snapshot(operation.target_block_path());
-
-    let ready = match operation.fresh_gate(refreshed_for_gate) {
-        Ok(ready) => ready,
-        Err(error) => {
-            println!("write-test: Write Gate rejected before OpenDevice: {error:?}");
-            return Ok(WriteTestExit::Completed);
-        }
-    };
-
-    println!(
-        "write-test: Write Gate (pre-open) passed. WritePlan: image_size={} target_size={} chunk_size={}",
-        ready.plan().image_size, ready.plan().target_size, ready.plan().chunk_size
-    );
-
-    println!(
-        "write-test: requesting OpenDevice(mode=\"rw\") on {}.",
-        ready.current().block_path
-    );
-    println!(
-        "If a polkit authentication prompt appears, please complete it yourself -- \
-         this program will not use sudo or any other privilege bypass."
-    );
-
-    let open_result = linux_access::open_device(
-        &ready.current().block_path,
-        linux_access::OpenAccess::WriteExclusive,
-    );
-
-    // Metadata must be read from the handle *before* the handle's ownership
-    // moves into `finalize_prepared_write`, exactly like `run_prepare_test`
-    // above -- `core.rs` stays free of Linux I/O calls.
-    let (handle_opt, metadata) = match open_result {
-        Ok(handle) => {
-            println!("write-test: OpenDevice: success");
-            let metadata = handle.metadata();
-            (Some(handle), metadata)
-        }
-        Err(error) => {
-            println!("write-test: OpenDevice: failed ({error:?})");
-            (None, None)
-        }
-    };
-
-    if let Some(meta) = &metadata {
-        println!(
-            "write-test: FD major:minor={}:{} size={:?} diskseq={:?}",
-            meta.major, meta.minor, meta.size, meta.diskseq
-        );
+            OperationError::Image(PrepareImageError::CompressedImage(rejection)) => {
+                print_lines(format_compressed_image_rejected(rejection))
+            }
+            OperationError::Image(PrepareImageError::TargetChanged(state)) => {
+                println!("write-test: the target changed while the image was being validated:");
+                print_selection_state(state);
+                println!("write-test: stopping before confirmation; nothing was written.");
+            }
+            OperationError::Image(PrepareImageError::Image(
+                error @ (image_source::ImageSourceError::UnsupportedFormat(_)
+                | image_source::ImageSourceError::ExtensionMismatch { .. }),
+            )) => print_lines(format_image_format_rejected(error)),
+            OperationError::Image(PrepareImageError::Image(error)) => println!(
+                "write-test: failed to open image {}: {error:?}",
+                observer.image_path
+            ),
+            OperationError::Confirmation(ConfirmError::Mismatch)
+            | OperationError::ConfirmationInputClosed => confirmation_failed(),
+            OperationError::Confirmation(ConfirmError::Intent(error)) => {
+                println!(
+                    "write-test: confirmation accepted for {}",
+                    observer.expected_device
+                );
+                println!("write-test: WriteIntent construction rejected: {error:?}");
+            }
+            OperationError::ConfirmationInputFailed(error) => {
+                println!("write-test: failed to read the confirmation input: {error}");
+                confirmation_failed();
+            }
+            OperationError::WriteGate(error) => {
+                println!("write-test: Write Gate rejected before OpenDevice: {error:?}")
+            }
+            OperationError::WriteDeviceRejected { error, .. } => {
+                println!("write-test: Write Gate rejected after OpenDevice: {error:?}");
+                println!(
+                    "write-test: FD (if any was opened) was already closed via RAII inside the Write Gate"
+                );
+            }
+            OperationError::ImageBinding(error) => {
+                println!("write-test: AuthorizedExecution::bind() rejected: {error:?}");
+                println!("write-test: AuthorizedWrite dropped -- FD closed via RAII");
+            }
+            OperationError::ReaderOpen(error) => {
+                println!("write-test: begin_write() failed to open the image reader: {error}");
+                println!(
+                    "write-test: AuthorizedExecution dropped -- FD closed via RAII, 0 bytes written"
+                );
+            }
+            OperationError::Write { failed, image_size } => {
+                println!("write-test: write FAILED: {failed:?}");
+                println!(
+                    "write-test: not syncing -- retry_requires_fresh_gate={}",
+                    failed.retry_requires_fresh_gate
+                );
+                identity_preserved(*image_size);
+            }
+            OperationError::SyncWorkerPanicked { cancel_requested } => {
+                print_lines(format_sync_worker_panicked());
+                if *cancel_requested {
+                    println!(
+                        "write-test: cancellation was also requested; the sync failure above is the result"
+                    );
+                }
+            }
+            // A real sync failure is never masked by a cancellation
+            // requested at the same time: the result stays the failure;
+            // this only notes it.
+            OperationError::Sync {
+                failed,
+                cancel_requested,
+                image_size,
+            } => {
+                println!("write-test: sync FAILED: {failed:?}");
+                println!(
+                    "write-test: retry_requires_fresh_gate={} -- not retrying automatically",
+                    failed.retry_requires_fresh_gate
+                );
+                if *cancel_requested {
+                    println!(
+                        "write-test: cancellation was also requested; the sync failure above is the result"
+                    );
+                }
+                identity_preserved(*image_size);
+            }
+            OperationError::VerifyNotStarted(VerifyNotStarted::TestPauseEnded) => {
+                println!(
+                    "write-test: no input received on the test pause (EOF or I/O error) -- stopping before verification."
+                );
+                println!(
+                    "write-test: write + sync already completed successfully; verification was not attempted."
+                );
+            }
+            // Verify Pre-flight Diagnostics: the re-check's rejection carries
+            // the diagnostics that produced it whenever one could be
+            // computed -- only `SnapshotRefreshFailed` has none. Write and
+            // sync already succeeded; the wording keeps that explicit.
+            OperationError::VerifyNotStarted(VerifyNotStarted::TargetCheck {
+                error,
+                diagnostics,
+                image_size,
+            }) => {
+                println!("write-test: write + sync completed successfully.");
+                println!("write-test: verification could not start: {error:?}");
+                match diagnostics {
+                    Some(diagnostics) => {
+                        println!("write-test: verify target re-check: FAILED");
+                        for line in format_verify_diagnostics_summary(diagnostics) {
+                            println!("write-test:   {line}");
+                        }
+                    }
+                    None => {
+                        println!("write-test: verify target re-check: unavailable");
+                        for line in format_verify_diagnostics_unavailable() {
+                            println!("write-test:   {line}");
+                        }
+                    }
+                }
+                identity_preserved(*image_size);
+            }
+            OperationError::VerifyNotStarted(VerifyNotStarted::Start {
+                error, image_size, ..
+            }) => {
+                println!("write-test: write + sync completed successfully.");
+                println!("write-test: verification could not start: {error:?}");
+                identity_preserved(*image_size);
+            }
+            OperationError::Verify { failed, image_size } => {
+                println!("write-test: write + sync completed successfully.");
+                println!(
+                    "write-test: verification failed: {}",
+                    format_verify_failure_reason(&failed.reason)
+                );
+                println!(
+                    "write-test: verified_bytes={} before failure (mode={:?})",
+                    failed.verified_bytes, failed.mode
+                );
+                identity_preserved_after_verification(*image_size);
+            }
+        },
     }
-
-    let prepared = match core::finalize_prepared_write(ready, handle_opt, metadata.as_ref()) {
-        // `finalize_prepared_write` can only reach `Ok` after
-        // `check_fd_binding` (core.rs) itself returned `FdBindingCheck::Match`
-        // -- `Mismatch`/`InsufficientInformation` both return `Err` before a
-        // `PreparedWrite` is ever constructed. So printing "Match" here is
-        // not a guess about internal state; it is what reaching this arm at
-        // all already proves.
-        Ok(prepared) => {
-            println!("write-test: FD binding: Match");
-            prepared
-        }
-        Err(error) => {
-            println!("write-test: Write Gate rejected after OpenDevice: {error:?}");
-            println!("write-test: FD (if any was opened) was already closed via RAII inside the Write Gate");
-            return Ok(WriteTestExit::Completed);
-        }
-    };
-
-    println!(
-        "write-test: PreparedWrite established for {} (target_size={} image_size={})",
-        prepared.target_block_path, prepared.target_size, prepared.image_size
-    );
-
-    // PreparedWrite -> AuthorizedWrite. The fd moves once, with no
-    // dup()/try_clone(), exactly like `run_prepare_test`. Unlike
-    // `run_prepare_test`, this `authorized` is not dropped here -- it is
-    // handed straight to `AuthorizedExecution::bind()` (through
-    // `operation.bind()`), together with the exact `SelectedImage` the
-    // operation has held since the image was opened.
-    let authorized = prepared.begin();
-    println!("write-test: WRITE SESSION AUTHORIZED (verify_mode={verify_mode:?})");
-
-    let execution = match operation.bind(authorized) {
-        Ok(execution) => execution,
-        Err(error) => {
-            println!("write-test: AuthorizedExecution::bind() rejected: {error:?}");
-            println!("write-test: AuthorizedWrite dropped -- FD closed via RAII");
-            return Ok(WriteTestExit::Completed);
-        }
-    };
-    println!("write-test: AuthorizedExecution bound (image_generation/image_size match confirmed)");
-
-    // `cancel.clone()`, not `cancel`: the shared handle created after Human
-    // Confirmation above must survive this call so it can also be handed to
-    // `begin_verify()` later (and read from the write progress callback
-    // below) -- see that handle's own doc comment.
-    let writing_execution = match execution.begin_write(cancel.clone()) {
-        Ok(writing_execution) => writing_execution,
-        Err(error) => {
-            println!("write-test: begin_write() failed to open the image reader: {error}");
-            println!(
-                "write-test: AuthorizedExecution dropped -- FD closed via RAII, 0 bytes written"
-            );
-            return Ok(WriteTestExit::Completed);
-        }
-    };
-    println!("write-test: write started");
-
-    // `cancellation_notice_shown`: this progress callback is a convenient,
-    // already-existing place to tell the user their Ctrl+C was seen, the
-    // *first* time it's observed -- but it is only a best-effort, early
-    // notice. It is not guaranteed to run at all (e.g. cancellation
-    // requested after the last chunk already completed) and is never the
-    // thing that decides whether the write actually stopped -- that is
-    // `WriteAttemptOutcome::Cancelled` below, unconditionally.
-    let mut cancellation_notice_shown = false;
-
-    let (selected_image, outcome) = writing_execution.write(|progress| {
-        if cancel.is_requested() && !cancellation_notice_shown {
-            cancellation_notice_shown = true;
-            println!(
-                "write-test: cancellation requested -- waiting for the current operation to stop safely."
-            );
-        }
-        let percent = if progress.total_bytes > 0 {
-            (progress.bytes_written as f64 / progress.total_bytes as f64) * 100.0
-        } else {
-            100.0
-        };
-        println!(
-            "write-test: progress {}/{} bytes ({percent:.1}%)",
-            progress.bytes_written, progress.total_bytes
-        );
-    });
-
-    let write_test_exit = match outcome {
-        write_job::WriteAttemptOutcome::Succeeded(succeeded) => {
-            println!(
-                "write-test: write succeeded ({} of {} bytes written)",
-                succeeded.bytes_written, succeeded.image_size
-            );
-
-            // Write success -> sync, in the same straight line, with no
-            // branch that returns early and skips it.
-            println!("write-test: syncing...");
-            // Sync runs on a worker thread while this (main) thread waits in
-            // an interruptible `join()` -- see `run_off_main_thread` for why
-            // this matters for a Ctrl+C pressed during sync. Sync is still
-            // awaited to completion; it is never interrupted.
-            let syncing = succeeded.begin_sync();
-            let sync_outcome = match orchestration::sync_worker::run_off_main_thread(
-                syncing,
-                |syncing| syncing.sync(),
-            ) {
-                orchestration::sync_worker::OffMainThread::Finished(outcome) => outcome,
-                orchestration::sync_worker::OffMainThread::NotStarted(syncing, error) => {
-                    // Durability first: if no worker thread can be created,
-                    // sync on this thread rather than skip it. A Ctrl+C
-                    // during this sync may only be observed once it returns
-                    // (the post-sync check below still runs).
-                    println!(
-                        "write-test: could not start the sync worker thread ({error}); syncing on the main thread instead"
-                    );
-                    syncing.sync()
-                }
-                orchestration::sync_worker::OffMainThread::Panicked => {
-                    for line in format_sync_worker_panicked() {
-                        println!("write-test: {line}");
-                    }
-                    if cancel.is_requested() {
-                        println!(
-                            "write-test: cancellation was also requested; the sync failure above is the result"
-                        );
-                    }
-                    return Ok(WriteTestExit::Completed);
-                }
-            };
-
-            match sync_outcome {
-                write_job::SyncAttemptOutcome::Succeeded(sync_succeeded) => {
-                    println!(
-                        "write-test: sync succeeded -- write + sync completed ({} bytes)",
-                        sync_succeeded.bytes_written
-                    );
-
-                    // Sync itself is never interrupted (durability first),
-                    // but a Ctrl+C accepted while it ran must not be silently
-                    // turned into `Completed` -- for any `VerifyMode`,
-                    // including `None`, which never reaches the Quick/Full
-                    // early cancel check further below. That later check
-                    // stays: it still covers a cancellation arriving after
-                    // this point (e.g. during the test-only pause).
-                    if orchestration::after_successful_sync(cancel.is_requested())
-                        == orchestration::AfterSync::Cancelled
-                    {
-                        for line in format_cancelled_after_sync() {
-                            println!("write-test: {line}");
-                        }
-                        return Ok(WriteTestExit::Cancelled);
-                    }
-
-                    // ---- Built-in Verify (self-contained: this arm always
-                    // returns, so `selected_image` being consumed here --
-                    // via `begin_verify()` -- never conflicts with the
-                    // trailing print below, which only the *other* three
-                    // arms (which never touch `selected_image`) can reach.
-                    // `cancel.clone()`, the same shared handle Ctrl+C was
-                    // wired to right after target selection -- a
-                    // cancellation requested during write or sync was
-                    // already honored by the post-sync check above; one
-                    // requested after that check is still honored by the
-                    // early cancel check right after the TEST PAUSE block
-                    // below. ----
-                    match sync_succeeded.begin_verify(selected_image, cancel.clone()) {
-                        write_job::VerifyStart::Skipped(image, succeeded) => {
-                            println!("write-test: {}", format_verify_succeeded(&succeeded));
-                            println!(
-                                "write-test: SelectedImage identity preserved after verification (image_size={})",
-                                image.logical_size()
-                            );
-                            return Ok(WriteTestExit::Completed);
-                        }
-                        write_job::VerifyStart::Pending(pending) => {
-                            match verify_mode {
-                                core::VerifyMode::Quick => println!(
-                                    "write-test: Quick verification checks selected regions only. It does not verify the entire image."
-                                ),
-                                core::VerifyMode::Full => println!(
-                                    "write-test: Full verification reads back the entire written image."
-                                ),
-                                core::VerifyMode::None => unreachable!(
-                                    "VerifyMode::None always produces VerifyStart::Skipped, never Pending"
-                                ),
-                            }
-
-                            // TEST-ONLY (implementation of the Mount-Allowance
-                            // Real-device Test design, reports/latest.md):
-                            // pauses here, strictly before the fresh
-                            // `DeviceSnapshot` below is fetched, so a child
-                            // partition can be mounted manually and actually
-                            // be reflected in that fresh snapshot's
-                            // `mount_points`. Everything below this block --
-                            // `collect_device_snapshot`, `check_target`,
-                            // Identity/Instance/hazard checks,
-                            // `OpenDevice(mode="r", O_DIRECT)`, FD binding -- is
-                            // unchanged and still runs in full; this flag
-                            // only delays when it starts. Safe to hold
-                            // `pending` here indefinitely: `begin_verify()`
-                            // already dropped the write-mode FD before
-                            // returning it (see `write_job.rs`'s own
-                            // `SyncSucceeded::begin_verify()`), so `pending`
-                            // is inert data (a cloned baseline `DeviceSnapshot`,
-                            // the `SelectedImage`, `VerifyMode`, and a
-                            // `CancelHandle`) with no open capability of any
-                            // kind while this waits on stdin.
-                            if test_pause_before_verify && !pause_before_verify_for_test() {
-                                println!(
-                                    "write-test: no input received on the test pause (EOF or I/O error) -- stopping before verification."
-                                );
-                                println!(
-                                    "write-test: write + sync already completed successfully; verification was not attempted."
-                                );
-                                return Ok(WriteTestExit::Completed);
-                            }
-
-                            // Cancel wiring: a Ctrl+C requested after the
-                            // post-sync check (during the TEST PAUSE above,
-                            // or simply while reading these messages) must be
-                            // honored now, before any further D-Bus call or
-                            // FD is opened for Verify.
-                            // `begin_verify()` itself does not check this
-                            // (it only branches on `VerifyMode` -- see its
-                            // own doc comment in `write_job.rs`), so this is
-                            // the one place that closes that gap, entirely
-                            // within `main.rs`. `pause_before_verify_for_test`
-                            // itself is not made "signal aware" -- whatever
-                            // it returned above, this check runs
-                            // unconditionally right after it.
-                            if cancel.is_requested() {
-                                for line in format_verify_cancelled_before_start() {
-                                    println!("write-test: {line}");
-                                }
-                                return Ok(WriteTestExit::Cancelled);
-                            }
-
-                            println!(
-                                "write-test: requesting a fresh DeviceSnapshot for verification on {}.",
-                                pending.block_path()
-                            );
-                            let refreshed_for_verify =
-                                collect_device_snapshot(pending.block_path());
-
-                            let ready = match pending.check_target(refreshed_for_verify) {
-                                Ok(ready) => ready,
-                                // Verify Pre-flight Diagnostics (implementation step
-                                // 5+6): `check_target()`'s rejection carries the
-                                // `VerifyTargetDiagnostics` that produced it whenever
-                                // one could be computed -- only `SnapshotRefreshFailed`
-                                // has none, since there is no fresh snapshot to
-                                // diagnose against in that case. Write/Sync already
-                                // succeeded by this point; only Verify's own
-                                // pre-flight failed, and the wording below keeps that
-                                // distinction explicit rather than implying the write
-                                // itself failed.
-                                Err((image, error, diagnostics)) => {
-                                    println!("write-test: write + sync completed successfully.");
-                                    println!("write-test: verification could not start: {error:?}");
-                                    match diagnostics {
-                                        Some(diagnostics) => {
-                                            println!("write-test: verify target re-check: FAILED");
-                                            for line in
-                                                format_verify_diagnostics_summary(&diagnostics)
-                                            {
-                                                println!("write-test:   {line}");
-                                            }
-                                        }
-                                        None => {
-                                            println!(
-                                                "write-test: verify target re-check: unavailable"
-                                            );
-                                            for line in format_verify_diagnostics_unavailable() {
-                                                println!("write-test:   {line}");
-                                            }
-                                        }
-                                    }
-                                    println!(
-                                        "write-test: SelectedImage identity preserved (image_size={})",
-                                        image.logical_size()
-                                    );
-                                    return Ok(WriteTestExit::Completed);
-                                }
-                            };
-
-                            // Verify Pre-flight Diagnostics (implementation step
-                            // 5+6): the same five-line summary shown on the
-                            // rejection path above, now for the passing case --
-                            // "Simple by default": always shown, never a full
-                            // `DeviceSnapshot` dump. Borrowed from `ready` before
-                            // `ready.finalize(...)` consumes it below; the borrow
-                            // ends at the end of this `for` loop, well before that
-                            // move.
-                            println!("write-test: verify target re-check: OK");
-                            for line in format_verify_diagnostics_summary(ready.diagnostics()) {
-                                println!("write-test:   {line}");
-                            }
-
-                            println!(
-                                "write-test: requesting OpenDevice(mode=\"r\", O_DIRECT) on {} for verification.",
-                                ready.block_path()
-                            );
-                            println!(
-                                "If a polkit authentication prompt appears, please complete it yourself -- \
-                                 this program will not use sudo or any other privilege bypass."
-                            );
-
-                            let open_result = linux_access::open_device(
-                                ready.block_path(),
-                                linux_access::OpenAccess::ReadOnlyDirect,
-                            );
-
-                            let (handle_opt, metadata) = match open_result {
-                                Ok(handle) => {
-                                    println!(
-                                        "write-test: OpenDevice(mode=\"r\", O_DIRECT): success"
-                                    );
-                                    let metadata = handle.metadata();
-                                    (Some(handle), metadata)
-                                }
-                                Err(error) => {
-                                    println!(
-                                        "write-test: OpenDevice(mode=\"r\", O_DIRECT): failed ({error:?})"
-                                    );
-                                    (None, None)
-                                }
-                            };
-
-                            if let Some(meta) = &metadata {
-                                println!(
-                                    "write-test: verify FD major:minor={}:{} size={:?} diskseq={:?}",
-                                    meta.major, meta.minor, meta.size, meta.diskseq
-                                );
-                            }
-
-                            let verifying = match ready.finalize(handle_opt, metadata.as_ref()) {
-                                // Reaching `Ok` here already proves
-                                // `check_fd_binding` (core.rs) returned
-                                // `FdBindingCheck::Match` -- same reasoning
-                                // as the write path's own "FD binding:
-                                // Match" line above.
-                                Ok(verifying) => {
-                                    println!("write-test: verify FD binding: Match");
-                                    verifying
-                                }
-                                Err((image, error)) => {
-                                    println!("write-test: write + sync completed successfully.");
-                                    println!("write-test: verification could not start: {error:?}");
-                                    println!(
-                                        "write-test: SelectedImage identity preserved (image_size={})",
-                                        image.logical_size()
-                                    );
-                                    return Ok(WriteTestExit::Completed);
-                                }
-                            };
-
-                            println!("write-test: verification started");
-
-                            // See the write progress callback's own comment
-                            // above for why `cancellation_notice_shown` is
-                            // only a best-effort notice. `last_verify_total_bytes`
-                            // caches the same `total_bytes` the progress
-                            // lines already display, purely so the final
-                            // Cancelled message below can report "X of Y"
-                            // without `write_job.rs` needing to expose a
-                            // separate way to compute Quick's sampled total.
-                            let mut cancellation_notice_shown = false;
-                            let mut last_verify_total_bytes: u64 = 0;
-
-                            let (image, verify_outcome) = verifying.run(|progress| {
-                                last_verify_total_bytes = progress.total_bytes;
-                                if cancel.is_requested() && !cancellation_notice_shown {
-                                    cancellation_notice_shown = true;
-                                    println!(
-                                        "write-test: cancellation requested -- waiting for the current operation to stop safely."
-                                    );
-                                }
-                                let percent = if progress.total_bytes > 0 {
-                                    (progress.verified_bytes as f64 / progress.total_bytes as f64)
-                                        * 100.0
-                                } else {
-                                    100.0
-                                };
-                                println!(
-                                    "write-test: verify progress {}/{} bytes ({percent:.1}%)",
-                                    progress.verified_bytes, progress.total_bytes
-                                );
-                            });
-
-                            let verify_exit = match verify_outcome {
-                                write_job::VerifyOutcome::Succeeded(succeeded) => {
-                                    println!("write-test: {}", format_verify_succeeded(&succeeded));
-                                    WriteTestExit::Completed
-                                }
-                                write_job::VerifyOutcome::Failed(failed) => {
-                                    println!("write-test: write + sync completed successfully.");
-                                    println!(
-                                        "write-test: verification failed: {}",
-                                        format_verify_failure_reason(&failed.reason)
-                                    );
-                                    println!(
-                                        "write-test: verified_bytes={} before failure (mode={:?})",
-                                        failed.verified_bytes, failed.mode
-                                    );
-                                    WriteTestExit::Completed
-                                }
-                                write_job::VerifyOutcome::Cancelled(cancelled) => {
-                                    for line in
-                                        format_verify_cancelled(&cancelled, last_verify_total_bytes)
-                                    {
-                                        println!("write-test: {line}");
-                                    }
-                                    WriteTestExit::Cancelled
-                                }
-                            };
-
-                            println!(
-                                "write-test: SelectedImage identity preserved after verification (image_size={})",
-                                image.logical_size()
-                            );
-
-                            return Ok(verify_exit);
-                        }
-                    }
-                }
-                write_job::SyncAttemptOutcome::Failed(failed) => {
-                    println!("write-test: sync FAILED: {failed:?}");
-                    println!(
-                        "write-test: retry_requires_fresh_gate={} -- not retrying automatically",
-                        failed.retry_requires_fresh_gate
-                    );
-                    // A real sync failure is never masked by a cancellation
-                    // requested at the same time: the result stays the
-                    // failure (`Completed`, as before); this only notes it.
-                    if cancel.is_requested() {
-                        println!(
-                            "write-test: cancellation was also requested; the sync failure above is the result"
-                        );
-                    }
-                    WriteTestExit::Completed
-                }
-            }
-        }
-        write_job::WriteAttemptOutcome::Failed(failed) => {
-            println!("write-test: write FAILED: {failed:?}");
-            println!(
-                "write-test: not syncing -- retry_requires_fresh_gate={}",
-                failed.retry_requires_fresh_gate
-            );
-            WriteTestExit::Completed
-        }
-        write_job::WriteAttemptOutcome::Cancelled(cancelled) => {
-            for line in format_write_cancelled(&cancelled) {
-                println!("write-test: {line}");
-            }
-            println!(
-                "write-test: not syncing -- retry_requires_fresh_gate={}",
-                cancelled.retry_requires_fresh_gate
-            );
-            WriteTestExit::Cancelled
-        }
-    };
-
-    // Reached only by the write-Failed, write-Cancelled, and sync-Failed
-    // paths above -- the sync-Succeeded path always returns from within its
-    // own arm (see above), together with `selected_image`, before control
-    // flow can ever reach here. `selected_image` is therefore guaranteed to
-    // still be owned by this scope on every path that reaches this line.
-    println!(
-        "write-test: SelectedImage identity preserved (image_size={})",
-        selected_image.logical_size()
-    );
-
-    Ok(write_test_exit)
 }
 
 // Parses a CLI verify-mode argument (`none` | `quick` | `full`, lowercase
@@ -1769,8 +1531,9 @@ fn format_verify_failure_reason(reason: &write_job::VerifyFailureReason) -> Stri
 // Every helper below is a pure formatter: it takes already-computed
 // `core::VerifyTargetDiagnostics` data (or one of its fields) and returns a
 // `String`/`Vec<String>`, never printing anything itself. `println!` calls
-// live only at the two `run_write_test` call sites (success path and
-// failure path), which loop over the returned lines -- this keeps the
+// live only at the two `write-test` call sites (`CliObserver`'s success
+// path and `print_write_test_outcome`'s failure path), which loop over the
+// returned lines -- this keeps the
 // comparison/wording logic testable without capturing stdout, and keeps
 // `core.rs`/`write_job.rs` themselves free of any UI/logging dependency
 // (the diagnostics data they produce is plain data; only `main.rs` decides
@@ -2121,7 +1884,7 @@ fn format_verify_cancelled(
 // Shown when `cancel.is_requested()` is already `true` by the time
 // `VerifyStart::Pending` is reached -- before `collect_device_snapshot()`,
 // `check_target()`, or `OpenDevice(mode="r", O_DIRECT)` are ever called (see the early
-// cancel check in `run_write_test`). Deliberately does not claim any FD/D-Bus
+// cancel check before Verify in `orchestration::operation::run_on`). Deliberately does not claim any FD/D-Bus
 // state was opened-then-closed: none of it was ever opened at all.
 fn format_verify_cancelled_before_start() -> Vec<String> {
     vec![
@@ -2230,7 +1993,7 @@ mod tests {
         format_verify_cancelled, format_verify_cancelled_before_start,
         format_verify_diagnostics_summary, format_verify_diagnostics_unavailable,
         format_verify_failure_reason, format_verify_succeeded, format_write_cancelled,
-        parse_verify_mode, parse_write_test_trailing_args, wait_for_prompt_input,
+        parse_verify_mode, parse_write_test_trailing_args, wait_for_prompt_input, write_test_exit,
         write_test_exit_code,
     };
     use crate::device::DeviceSnapshot;
@@ -2280,7 +2043,7 @@ mod tests {
         let production = production_source();
         assert_eq!(
             production.matches("linux_access::open_device(").count(),
-            4,
+            2,
             "a new OpenDevice call site must be added to this test"
         );
 
@@ -2298,94 +2061,134 @@ mod tests {
             );
         }
 
-        // write-test: the write FD is exclusive, and the Verify FD opened
-        // after it is read-only with O_DIRECT -- once, and only on the path
-        // where Verify is pending (Quick / Full), never for None.
-        let write_test = production_fn_source("run_write_test");
-        assert_eq!(write_test.matches("OpenAccess::WriteExclusive").count(), 1);
-        assert_eq!(write_test.matches("OpenAccess::ReadOnlyDirect").count(), 1);
-        let write = write_test.find("OpenAccess::WriteExclusive").unwrap();
-        let skipped = write_test.find("write_job::VerifyStart::Skipped").unwrap();
-        let pending = write_test.find("write_job::VerifyStart::Pending").unwrap();
-        let verify = write_test.find("OpenAccess::ReadOnlyDirect").unwrap();
-        assert!(
-            write < verify,
-            "the write FD is opened before the Verify FD"
+        // write-test opens nothing itself: its two OpenDevice calls (the
+        // exclusive write FD, then -- only for Quick / Full, after the write
+        // FD is closed -- the read-only O_DIRECT Verify FD) are made by
+        // `orchestration::operation` (checked by its
+        // `the_production_path_runs_in_order`), through the platform, which
+        // passes the requested access on unchanged.
+        assert!(!production_fn_source("run_write_test").contains("OpenAccess"));
+        let platform = include_str!("orchestration/platform.rs");
+        assert_eq!(
+            platform
+                .matches("linux_access::open_device(block_path, access)")
+                .count(),
+            1
         );
-        assert!(
-            skipped < pending && pending < verify,
-            "the Verify FD is opened only in the Pending arm"
-        );
+        assert!(!platform.contains("OpenAccess::"));
     }
 
-    // `run_write_test` still performs the safe sequence in the same order
-    // since its first half moved into `orchestration::operation` (Phase
-    // 3A-1 / 3A-3): each step appears exactly once, in this order. Inside
-    // the first-half steps (`prepare_image`, `confirm`, `fresh_gate`,
-    // `bind`) the order -- image open, Preflight, target re-check,
-    // confirmation text, WriteIntent, ConfirmationToken, Write Gate, bind --
-    // is checked by `orchestration::operation`'s own
-    // `the_first_half_runs_in_order`.
+    // `write-test` only wires Ctrl+C, runs the operation and reports how it
+    // ended; the safe sequence itself -- select, image, confirmation, Write
+    // Gate, OpenDevice, FD binding, write, sync, Verify -- is
+    // `orchestration::operation::run_write_operation`'s alone (its order is
+    // checked there). Nothing in the CLI's write-test code calls a step of
+    // it.
     #[test]
-    fn run_write_test_keeps_its_step_order() {
+    fn write_test_only_drives_the_operation() {
         let write_test = production_fn_source("run_write_test");
-        let steps = [
-            "orchestration::operation::select_write_target(&platform, &target)",
-            "install_cancel_handler(cancel.clone())",
-            "selected_target.prepare_image(",
-            "image.request_confirmation(&cancel)",
-            "spawn_prompt_reader()",
-            "pending.confirm(&input)",
-            "collect_device_snapshot(operation.target_block_path())",
-            "operation.fresh_gate(refreshed_for_gate)",
-            "linux_access::OpenAccess::WriteExclusive",
-            "core::finalize_prepared_write(",
-            "prepared.begin()",
-            "operation.bind(authorized)",
-            "execution.begin_write(cancel.clone())",
-            "writing_execution.write(",
-            "succeeded.begin_sync()",
-            "orchestration::sync_worker::run_off_main_thread(",
-            "orchestration::after_successful_sync(cancel.is_requested())",
-            "sync_succeeded.begin_verify(selected_image, cancel.clone())",
-            "write_job::VerifyStart::Skipped",
-            "write_job::VerifyStart::Pending",
-            "pending.check_target(refreshed_for_verify)",
-            "linux_access::OpenAccess::ReadOnlyDirect",
-            "ready.finalize(handle_opt, metadata.as_ref())",
-            "verifying.run(",
-        ];
         let mut previous = 0;
-        for step in steps {
+        for step in [
+            "install_cancel_handler(cancel.clone())",
+            "orchestration::operation::run_write_operation(request, &cancel, &mut observer)",
+            "print_write_test_outcome(&outcome, &observer, &block_path)",
+            "write_test_exit(&outcome)",
+        ] {
             assert_eq!(write_test.matches(step).count(), 1, "{step}");
             let at = write_test.find(step).unwrap();
             assert!(at > previous, "{step} is out of order");
             previous = at;
         }
+
+        // The CLI's write-test code, without string literals (its messages
+        // name some of these steps) and comments.
+        let production = production_source();
+        let cli = &production[production.find("\nfn run_write_test(").unwrap()
+            ..production
+                .find("\n// Parses a CLI verify-mode argument")
+                .unwrap()];
+        let mut code = String::new();
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in cli.chars() {
+            if in_string {
+                match (escaped, c) {
+                    (false, '\\') => escaped = true,
+                    (false, '"') => in_string = false,
+                    _ => escaped = false,
+                }
+            } else if c == '"' {
+                in_string = true;
+            } else {
+                code.push(c);
+            }
+        }
+        let code: String = code
+            .lines()
+            .map(|line| line.split("//").next().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(code.contains("run_write_operation"));
+        for step in [
+            "linux_access::",
+            "collect_device_snapshot",
+            "select_target",
+            "core::select",
+            "core::revalidate",
+            "open_image",
+            "prepare_compressed_image",
+            "confirmation_matches",
+            "WriteIntent",
+            "ConfirmationToken",
+            "prepare_for_open",
+            "finalize_prepared_write",
+            "AuthorizedExecution::bind",
+            "begin_write",
+            "begin_sync",
+            "begin_verify",
+            "check_target",
+        ] {
+            assert!(!code.contains(step), "write-test calls {step} itself");
+        }
     }
 
-    // A cancellation seen right after a successful sync still ends the run
-    // as `Cancelled` (exit 130), only on the sync-success path and before
-    // Verify begins.
+    // Exit status: 130 for a cancellation at any point (including right
+    // after a successful sync), and `Completed` (exit 0) for everything
+    // else -- a refusal or failure included, unchanged in Phase 3A.
     #[test]
-    fn a_cancellation_after_sync_still_exits_130() {
-        let write_test = production_fn_source("run_write_test");
-        let succeeded = write_test
-            .find("write_job::SyncAttemptOutcome::Succeeded(sync_succeeded)")
-            .unwrap();
-        let check = write_test
-            .find("orchestration::after_successful_sync(cancel.is_requested())")
-            .unwrap();
-        let begin_verify = write_test.find("sync_succeeded.begin_verify(").unwrap();
-        let failed = write_test
-            .find("write_job::SyncAttemptOutcome::Failed(failed)")
-            .unwrap();
-        assert!(succeeded < check && check < begin_verify && begin_verify < failed);
+    fn write_test_exit_is_130_only_for_a_cancellation() {
+        use crate::orchestration::outcome::{CancelledAt, OperationError, OperationOutcome};
 
-        let branch = &write_test[check..begin_verify];
-        assert!(branch.contains("== orchestration::AfterSync::Cancelled"));
-        assert!(branch.contains("return Ok(WriteTestExit::Cancelled);"));
-        assert_eq!(write_test_exit_code(WriteTestExit::Cancelled), Some(130));
+        for at in [
+            CancelledAt::Preflight,
+            CancelledAt::BeforeConfirmation,
+            CancelledAt::Confirmation,
+            CancelledAt::AfterSync,
+            CancelledAt::BeforeVerify,
+        ] {
+            let exit = write_test_exit(&OperationOutcome::Cancelled(at));
+            assert_eq!(exit, WriteTestExit::Cancelled);
+            assert_eq!(write_test_exit_code(exit), Some(130));
+        }
+
+        for outcome in [
+            OperationOutcome::Completed {
+                verify: VerifySucceeded {
+                    mode: VerifyMode::None,
+                    verified_bytes: 0,
+                    skipped: true,
+                },
+                image_size: 1,
+            },
+            OperationOutcome::Failed(OperationError::ConfirmationInputClosed),
+            OperationOutcome::Failed(OperationError::WriteGate(
+                core::WriteGateError::SnapshotRefreshFailed,
+            )),
+        ] {
+            let exit = write_test_exit(&outcome);
+            assert_eq!(exit, WriteTestExit::Completed, "{outcome:?}");
+            assert_eq!(write_test_exit_code(exit), None);
+        }
     }
 
     // ---------------------------------------------------------------------

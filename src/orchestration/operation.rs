@@ -1,5 +1,9 @@
-// The first half of a write (orchestration, Core layer): from the target
-// reference to a confirmed intent, in four steps whose order the types fix.
+// A write operation (orchestration, Core layer): `run_write_operation` runs
+// the whole safe sequence -- target, image, confirmation, Write Gate,
+// OpenDevice, FD binding, write, sync, Verify -- in one fixed order, and a
+// caller only observes it (`OperationObserver`) and reads the outcome.
+//
+// The first half is four steps whose order the types fix:
 //
 //   select_write_target()        select + an immediate re-verification
 //     -> SelectedWriteTarget
@@ -12,32 +16,36 @@
 //     -> PreparedOperation        and ConfirmationToken
 //
 // Each step consumes the previous value, so no step can be skipped or
-// repeated, and the caller does its own user interaction (messages, the
-// prompt, the Ctrl+C handler) between them. Nothing here prints or reads
-// input. The existing primitives do all the deciding (`core::select`,
-// `core::revalidate`, `prepare_compressed_image`, `core::WriteIntent`,
-// `core::ConfirmationToken`); this module only runs them in order.
+// repeated. `PreparedOperation` keeps the confirmation token, the
+// `SelectedImage` and the selection to itself; the second half uses them
+// through its private `fresh_gate()` and `bind()`, and continues with the
+// existing `core` / `write_job` state machine (see `run_on`).
 //
-// `PreparedOperation` keeps the confirmation token, the `SelectedImage` and
-// the selection to itself. The second half (fresh Write Gate, OpenDevice,
-// FD binding, write, sync, Verify) is still driven by `main.rs`
-// (`run_write_test`) through `fresh_gate()` and `bind()`, which use them
-// without handing them out.
+// Nothing here prints or reads input. The existing primitives do all the
+// deciding (`core::select`, `core::revalidate`, `prepare_compressed_image`,
+// `core::WriteIntent`, `core::ConfirmationToken`, `core::prepare_for_open`,
+// `core::finalize_prepared_write`, `write_job`); this module only runs them
+// in order and reports what happened.
 
 use super::candidates::{self, DeviceDisplay, SelectTargetError, TargetRef};
-use super::confirmation_matches;
+use super::events::{ConfirmationDecision, OpenPurpose, OperationEvent, OperationObserver};
 use super::image::{CompressedImageRejection, prepare_compressed_image};
-use super::platform::Platform;
+use super::outcome::{CancelledAt, OperationError, OperationOutcome, VerifyNotStarted};
+use super::platform::{LinuxPlatform, Platform};
+use super::sync_worker::{OffMainThread, run_off_main_thread};
+use super::{AfterSync, after_successful_sync, confirmation_matches};
 use crate::device::{DeviceSnapshot, SnapshotFetchOutcome};
 use crate::execution::core::{
     self, AuthorizedWrite, ConfirmationToken, IntentBuildError, ReadyToOpen, SelectionState,
     VerifyMode, WriteGateError, WriteIntent,
 };
-use crate::execution::write_job::{AuthorizedExecution, CancelHandle, ImageBindingError};
-use crate::image_source::compressed::PreflightProgress;
-use crate::image_source::{
-    self, CompressionFormat, ImageSource, ImageSourceError, OpenedImage, SelectedImage,
+use crate::execution::linux_access::OpenAccess;
+use crate::execution::write_job::{
+    AuthorizedExecution, CancelHandle, ImageBindingError, SyncAttemptOutcome, VerifyOutcome,
+    VerifyStart, WriteAttemptOutcome,
 };
+use crate::image_source::compressed::PreflightError;
+use crate::image_source::{self, ImageSource, ImageSourceError, OpenedImage, SelectedImage};
 use crate::safety::SafetyAssessment;
 
 // The selected target's baseline snapshot and assessment. Every value in
@@ -102,8 +110,9 @@ impl SelectedWriteTarget {
     // bounded by the target's capacity (`prepare_compressed_image`;
     // `cancel` is checked during Preflight), and -- since that can take a
     // long time -- the target is re-verified (fresh snapshot; Identity /
-    // Instance / Safety). A raw image needs neither. `on_compressed` is
-    // called once a compressed image is recognised, before Preflight starts.
+    // Instance / Safety). A raw image needs neither. `on_event` receives
+    // `CompressedImageDetected` once a compressed image is recognised
+    // (before Preflight starts), then `PreflightProgress`.
     //
     // Every refusal here happens before the target is opened.
     pub(crate) fn prepare_image(
@@ -112,8 +121,7 @@ impl SelectedWriteTarget {
         image_path: &str,
         verify_mode: VerifyMode,
         cancel: &CancelHandle,
-        on_compressed: impl FnOnce(CompressionFormat),
-        on_preflight_progress: impl FnMut(PreflightProgress),
+        mut on_event: impl FnMut(OperationEvent<'_>),
     ) -> Result<ImagePrepared, PrepareImageError> {
         let SelectedWriteTarget { mut state } = self;
         let (baseline, _) = selected(&state);
@@ -124,13 +132,15 @@ impl SelectedWriteTarget {
             match image_source::open_image(image_path).map_err(PrepareImageError::Image)? {
                 OpenedImage::Raw(source) => Box::new(source),
                 OpenedImage::Compressed(compressed) => {
-                    on_compressed(compressed.format());
+                    on_event(OperationEvent::CompressedImageDetected {
+                        format: compressed.format(),
+                    });
                     let source = prepare_compressed_image(
                         compressed,
                         verify_mode,
                         target_capacity,
                         || cancel.is_requested(),
-                        on_preflight_progress,
+                        |progress| on_event(OperationEvent::PreflightProgress(progress)),
                     )
                     .map_err(PrepareImageError::CompressedImage)?;
 
@@ -279,7 +289,7 @@ impl PendingConfirmation {
 // Everything the second half needs, held together: the selection, the
 // image (the same `SelectedImage`, from the same open file), the Verify
 // mode and the confirmation token bound to them. There is no way to take
-// them out; the second half uses them through `fresh_gate()` and `bind()`.
+// them out; `run_on` uses them through `fresh_gate()` and `bind()`.
 pub(crate) struct PreparedOperation {
     state: SelectionState,
     image: SelectedImage,
@@ -288,6 +298,7 @@ pub(crate) struct PreparedOperation {
 }
 
 // What was confirmed, for display.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ConfirmedSummary<'a> {
     pub(crate) target_block_path: &'a str,
     pub(crate) image_size: u64,
@@ -295,7 +306,7 @@ pub(crate) struct ConfirmedSummary<'a> {
 }
 
 impl PreparedOperation {
-    pub(crate) fn confirmed(&self) -> ConfirmedSummary<'_> {
+    fn confirmed(&self) -> ConfirmedSummary<'_> {
         let intent = self.confirmation.intent();
         ConfirmedSummary {
             target_block_path: intent.target_block_path(),
@@ -305,18 +316,15 @@ impl PreparedOperation {
     }
 
     // The block path the fresh Write Gate snapshot must be read for.
-    pub(crate) fn target_block_path(&self) -> &str {
+    fn target_block_path(&self) -> &str {
         &selected(&self.state).0.block_path
     }
 
     // The fresh Write Gate (`core::prepare_for_open`) for this operation's
-    // own selection, image, Verify mode and confirmation token. The caller
+    // own selection, image, Verify mode and confirmation token. `run_on`
     // reads the fresh snapshot (for `target_block_path()`) immediately
     // before calling this.
-    pub(crate) fn fresh_gate(
-        &self,
-        refreshed: SnapshotFetchOutcome,
-    ) -> Result<ReadyToOpen, WriteGateError> {
+    fn fresh_gate(&self, refreshed: SnapshotFetchOutcome) -> Result<ReadyToOpen, WriteGateError> {
         core::prepare_for_open(
             &self.state,
             refreshed,
@@ -328,10 +336,7 @@ impl PreparedOperation {
 
     // Binds the Gate-authorized write to this operation's image
     // (`AuthorizedExecution::bind`: image generation, size, Quick access).
-    pub(crate) fn bind(
-        self,
-        authorized: AuthorizedWrite,
-    ) -> Result<AuthorizedExecution, ImageBindingError> {
+    fn bind(self, authorized: AuthorizedWrite) -> Result<AuthorizedExecution, ImageBindingError> {
         AuthorizedExecution::bind(authorized, self.image)
     }
 
@@ -341,19 +346,338 @@ impl PreparedOperation {
     }
 }
 
+// ---- The whole operation ----
+
+// What a caller asks for. Only choices, never a safety value: the target is
+// an opaque reference (re-read and re-verified before use), the image a
+// path (opened once, here), the Verify mode a policy. Everything the
+// sequence depends on -- snapshots, selection, confirmation token, FDs,
+// authorizations -- is produced inside the operation.
+pub(crate) struct WriteOperationRequest {
+    pub(crate) target: TargetRef,
+    pub(crate) image_path: String,
+    pub(crate) verify_mode: VerifyMode,
+}
+
+// Runs one write operation from start to finish on the calling thread and
+// reports how it ended. `cancel` is checked only at the existing cancel
+// points; the observer sees the steps as they happen and is asked for the
+// typed confirmation.
+pub(crate) fn run_write_operation(
+    request: WriteOperationRequest,
+    cancel: &CancelHandle,
+    observer: &mut impl OperationObserver,
+) -> OperationOutcome {
+    run_on(&LinuxPlatform, request, cancel, observer)
+}
+
+// The sequence itself, with the platform as a parameter so tests can run it
+// against temporary files. The order is fixed here and checked by
+// `tests::the_production_path_runs_in_order`.
+fn run_on(
+    platform: &impl Platform,
+    request: WriteOperationRequest,
+    cancel: &CancelHandle,
+    observer: &mut impl OperationObserver,
+) -> OperationOutcome {
+    use OperationOutcome::{Cancelled, Completed, Failed};
+
+    let WriteOperationRequest {
+        target,
+        image_path,
+        verify_mode,
+    } = request;
+
+    // ---- target, image, confirmation (nothing is opened on the target) ----
+    let selected_target = match select_write_target(platform, &target) {
+        Ok(selected_target) => selected_target,
+        Err(not_ready) => return Failed(OperationError::Target(not_ready)),
+    };
+    observer.on_event(OperationEvent::TargetSelected {
+        state: selected_target.state(),
+    });
+
+    let image =
+        match selected_target.prepare_image(platform, &image_path, verify_mode, cancel, |event| {
+            observer.on_event(event)
+        }) {
+            Ok(image) => image,
+            Err(PrepareImageError::CompressedImage(CompressedImageRejection::Preflight(
+                PreflightError::Cancelled,
+            ))) => return Cancelled(CancelledAt::Preflight),
+            Err(error) => return Failed(OperationError::Image(error)),
+        };
+    observer.on_event(OperationEvent::ImageSelected {
+        image_size: image.logical_size(),
+    });
+
+    let pending = match image.request_confirmation(cancel) {
+        Ok(pending) => pending,
+        Err(CancelledBeforeConfirmation) => return Cancelled(CancelledAt::BeforeConfirmation),
+    };
+
+    let operation = match observer.request_confirmation(&pending.request()) {
+        ConfirmationDecision::Submitted(typed) => match pending.confirm(&typed) {
+            Ok(operation) => operation,
+            Err(error) => return Failed(OperationError::Confirmation(error)),
+        },
+        ConfirmationDecision::InputClosed => {
+            return Failed(OperationError::ConfirmationInputClosed);
+        }
+        ConfirmationDecision::InputFailed(error) => {
+            return Failed(OperationError::ConfirmationInputFailed(error));
+        }
+        ConfirmationDecision::Cancelled => return Cancelled(CancelledAt::Confirmation),
+    };
+    observer.on_event(OperationEvent::Confirmed(operation.confirmed()));
+
+    // ---- fresh Write Gate, OpenDevice(WriteExclusive), FD binding ----
+    let refreshed = platform.fetch_snapshot(operation.target_block_path());
+    let ready = match operation.fresh_gate(refreshed) {
+        Ok(ready) => ready,
+        Err(error) => return Failed(OperationError::WriteGate(error)),
+    };
+    observer.on_event(OperationEvent::WriteGatePassed { plan: ready.plan() });
+
+    observer.on_event(OperationEvent::OpeningDevice {
+        purpose: OpenPurpose::Write,
+        block_path: &ready.current().block_path,
+    });
+    let (handle, metadata, open_error) =
+        match platform.open_device(&ready.current().block_path, OpenAccess::WriteExclusive) {
+            Ok(handle) => {
+                let metadata = platform.fd_metadata(&handle);
+                observer.on_event(OperationEvent::DeviceOpened {
+                    purpose: OpenPurpose::Write,
+                    metadata: metadata.as_ref(),
+                });
+                (Some(handle), metadata, None)
+            }
+            Err(error) => {
+                observer.on_event(OperationEvent::DeviceOpenFailed {
+                    purpose: OpenPurpose::Write,
+                    error: &error,
+                });
+                (None, None, Some(error))
+            }
+        };
+
+    let prepared = match core::finalize_prepared_write(ready, handle, metadata.as_ref()) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Failed(OperationError::WriteDeviceRejected {
+                error,
+                open_device: open_error,
+            });
+        }
+    };
+    observer.on_event(OperationEvent::FdBound {
+        purpose: OpenPurpose::Write,
+    });
+    observer.on_event(OperationEvent::WriteAuthorized {
+        target_block_path: &prepared.target_block_path,
+        target_size: prepared.target_size,
+        image_size: prepared.image_size,
+        verify_mode,
+    });
+
+    // ---- authorization -> image binding -> write ----
+    let execution = match operation.bind(prepared.begin()) {
+        Ok(execution) => execution,
+        Err(error) => return Failed(OperationError::ImageBinding(error)),
+    };
+    observer.on_event(OperationEvent::ImageBound);
+
+    let writing = match execution.begin_write(cancel.clone()) {
+        Ok(writing) => writing,
+        Err(error) => return Failed(OperationError::ReaderOpen(error)),
+    };
+    observer.on_event(OperationEvent::WriteStarted);
+
+    let (image, write_outcome) =
+        writing.write(|progress| observer.on_event(OperationEvent::WriteProgress(progress)));
+    let succeeded = match write_outcome {
+        WriteAttemptOutcome::Succeeded(succeeded) => succeeded,
+        WriteAttemptOutcome::Failed(failed) => {
+            return Failed(OperationError::Write {
+                failed,
+                image_size: image.logical_size(),
+            });
+        }
+        WriteAttemptOutcome::Cancelled(cancelled) => {
+            return Cancelled(CancelledAt::Write {
+                cancelled,
+                image_size: image.logical_size(),
+            });
+        }
+    };
+    observer.on_event(OperationEvent::WriteSucceeded {
+        bytes_written: succeeded.bytes_written,
+        image_size: succeeded.image_size,
+    });
+
+    // ---- sync: on a worker thread, awaited to completion, never skipped ----
+    observer.on_event(OperationEvent::SyncStarted);
+    let sync_outcome = match run_off_main_thread(succeeded.begin_sync(), |syncing| syncing.sync()) {
+        OffMainThread::Finished(outcome) => outcome,
+        OffMainThread::NotStarted(syncing, error) => {
+            observer.on_event(OperationEvent::SyncOnCallingThread { error: &error });
+            syncing.sync()
+        }
+        OffMainThread::Panicked => {
+            return Failed(OperationError::SyncWorkerPanicked {
+                cancel_requested: cancel.is_requested(),
+            });
+        }
+    };
+    let synced = match sync_outcome {
+        SyncAttemptOutcome::Succeeded(synced) => synced,
+        SyncAttemptOutcome::Failed(failed) => {
+            return Failed(OperationError::Sync {
+                failed,
+                cancel_requested: cancel.is_requested(),
+                image_size: image.logical_size(),
+            });
+        }
+    };
+    observer.on_event(OperationEvent::SyncSucceeded {
+        bytes_written: synced.bytes_written,
+    });
+
+    if after_successful_sync(cancel.is_requested()) == AfterSync::Cancelled {
+        return Cancelled(CancelledAt::AfterSync);
+    }
+
+    // ---- Verify: `begin_verify` closes the write FD first ----
+    let pending = match synced.begin_verify(image, cancel.clone()) {
+        VerifyStart::Skipped(image, verify) => {
+            return Completed {
+                verify,
+                image_size: image.logical_size(),
+            };
+        }
+        VerifyStart::Pending(pending) => pending,
+    };
+    observer.on_event(OperationEvent::VerifyPending { mode: verify_mode });
+
+    if !observer.pause_before_verify() {
+        return Failed(OperationError::VerifyNotStarted(
+            VerifyNotStarted::TestPauseEnded,
+        ));
+    }
+    if cancel.is_requested() {
+        return Cancelled(CancelledAt::BeforeVerify);
+    }
+
+    observer.on_event(OperationEvent::VerifySnapshotRequested {
+        block_path: pending.block_path(),
+    });
+    let refreshed = platform.fetch_snapshot(pending.block_path());
+    let ready = match pending.check_target(refreshed) {
+        Ok(ready) => ready,
+        Err((image, error, diagnostics)) => {
+            return Failed(OperationError::VerifyNotStarted(
+                VerifyNotStarted::TargetCheck {
+                    error,
+                    diagnostics,
+                    image_size: image.logical_size(),
+                },
+            ));
+        }
+    };
+    observer.on_event(OperationEvent::VerifyTargetChecked {
+        diagnostics: ready.diagnostics(),
+    });
+
+    observer.on_event(OperationEvent::OpeningDevice {
+        purpose: OpenPurpose::Verify,
+        block_path: ready.block_path(),
+    });
+    let (handle, metadata, open_error) =
+        match platform.open_device(ready.block_path(), OpenAccess::ReadOnlyDirect) {
+            Ok(handle) => {
+                let metadata = platform.fd_metadata(&handle);
+                observer.on_event(OperationEvent::DeviceOpened {
+                    purpose: OpenPurpose::Verify,
+                    metadata: metadata.as_ref(),
+                });
+                (Some(handle), metadata, None)
+            }
+            Err(error) => {
+                observer.on_event(OperationEvent::DeviceOpenFailed {
+                    purpose: OpenPurpose::Verify,
+                    error: &error,
+                });
+                (None, None, Some(error))
+            }
+        };
+
+    let verifying = match ready.finalize(handle, metadata.as_ref()) {
+        Ok(verifying) => verifying,
+        Err((image, error)) => {
+            return Failed(OperationError::VerifyNotStarted(VerifyNotStarted::Start {
+                error,
+                open_device: open_error,
+                image_size: image.logical_size(),
+            }));
+        }
+    };
+    observer.on_event(OperationEvent::FdBound {
+        purpose: OpenPurpose::Verify,
+    });
+    observer.on_event(OperationEvent::VerifyStarted);
+
+    let (image, verify_outcome) =
+        verifying.run(|progress| observer.on_event(OperationEvent::VerifyProgress(progress)));
+    let image_size = image.logical_size();
+    match verify_outcome {
+        VerifyOutcome::Succeeded(verify) => Completed { verify, image_size },
+        VerifyOutcome::Failed(failed) => Failed(OperationError::Verify { failed, image_size }),
+        VerifyOutcome::Cancelled(cancelled) => Cancelled(CancelledAt::Verify {
+            cancelled,
+            image_size,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_source::compressed::PreflightError;
+    use crate::execution::linux_access::{FdMetadata, OpenDeviceError, OpenedDeviceHandle};
+    use crate::execution::write_job::{CancelReason, VerifyFailureReason, WriteStage};
+    use crate::image_source::CompressionFormat;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io::Read as _;
+    use std::path::{Path, PathBuf};
 
     // Answers `fetch_snapshot` from a script, in order, and records every
-    // block path asked for. Running out of answers is a test failure.
+    // block path asked for; running out of answers is a test failure. For a
+    // whole operation it also plays the device: `open_device` opens a
+    // temporary file standing in for it (never a block device, never
+    // D-Bus), and `fd_metadata` reports the metadata of the scripted
+    // snapshot, so the real FD binding check (`core::check_fd_binding`)
+    // runs on it.
     struct ScriptedPlatform {
         answers: RefCell<VecDeque<SnapshotFetchOutcome>>,
         asked: RefCell<Vec<String>>,
+        device: Option<Device>,
+        opens: RefCell<Vec<OpenAccess>>,
+        // For each `ReadOnlyDirect` open: how many FDs of this process
+        // still pointed at the device file at that moment.
+        fds_open_at_verify: RefCell<Vec<usize>>,
+    }
+
+    #[derive(Default)]
+    struct Device {
+        path: PathBuf,
+        // Verify reads this file instead (a device whose content differs).
+        verify_from: Option<PathBuf>,
+        fail: Vec<OpenAccess>,
+        // Report a different minor number than the snapshot's.
+        wrong_metadata: bool,
+        // Open the "write" FD read-only, so every write fails.
+        read_only_write_fd: bool,
     }
 
     impl ScriptedPlatform {
@@ -361,12 +685,35 @@ mod tests {
             ScriptedPlatform {
                 answers: RefCell::new(answers.into()),
                 asked: RefCell::new(Vec::new()),
+                device: None,
+                opens: RefCell::new(Vec::new()),
+                fds_open_at_verify: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_device(answers: Vec<SnapshotFetchOutcome>, device: Device) -> Self {
+            ScriptedPlatform {
+                device: Some(device),
+                ..ScriptedPlatform::new(answers)
             }
         }
 
         fn fetches(&self) -> usize {
             self.asked.borrow().len()
         }
+
+        fn opens(&self) -> Vec<OpenAccess> {
+            self.opens.borrow().clone()
+        }
+    }
+
+    fn fds_pointing_at(path: &Path) -> usize {
+        let path = std::fs::canonicalize(path).unwrap();
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| *target == path)
+            .count()
     }
 
     impl Platform for ScriptedPlatform {
@@ -376,6 +723,47 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .expect("an unexpected snapshot fetch")
+        }
+
+        fn open_device(
+            &self,
+            block_path: &str,
+            access: OpenAccess,
+        ) -> Result<OpenedDeviceHandle, OpenDeviceError> {
+            let device = self.device.as_ref().expect("an unexpected OpenDevice");
+            assert_eq!(block_path, usb_stick().block_path);
+            self.opens.borrow_mut().push(access);
+            if access == OpenAccess::ReadOnlyDirect {
+                self.fds_open_at_verify
+                    .borrow_mut()
+                    .push(fds_pointing_at(&device.path));
+            }
+            if device.fail.contains(&access) {
+                return Err(OpenDeviceError::Connection("simulated".to_string()));
+            }
+            let file = match access {
+                OpenAccess::WriteExclusive => std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(!device.read_only_write_fd)
+                    .open(&device.path),
+                OpenAccess::ReadOnlyDirect => {
+                    std::fs::File::open(device.verify_from.as_ref().unwrap_or(&device.path))
+                }
+            }
+            .unwrap();
+            Ok(OpenedDeviceHandle::from_file_for_test(file))
+        }
+
+        fn fd_metadata(&self, _handle: &OpenedDeviceHandle) -> Option<FdMetadata> {
+            let device = self.device.as_ref().unwrap();
+            let snapshot = usb_stick();
+            Some(FdMetadata {
+                major: snapshot.major,
+                minor: snapshot.minor + u32::from(device.wrong_metadata),
+                size: Some(snapshot.size),
+                diskseq: snapshot.diskseq,
+                proc_fd_target: None,
+            })
         }
     }
 
@@ -477,14 +865,7 @@ mod tests {
         mode: VerifyMode,
         cancel: &CancelHandle,
     ) -> Result<ImagePrepared, PrepareImageError> {
-        selected_target(platform).prepare_image(
-            platform,
-            image.path(),
-            mode,
-            cancel,
-            |_| {},
-            |_| {},
-        )
+        selected_target(platform).prepare_image(platform, image.path(), mode, cancel, |_| {})
     }
 
     fn read_all(image: &SelectedImage) -> Vec<u8> {
@@ -556,8 +937,15 @@ mod tests {
                     image.path(),
                     VerifyMode::Full,
                     &cancel,
-                    |format| recognised = Some(format),
-                    |progress| last_progress = Some(progress.logical_produced),
+                    |event| match event {
+                        OperationEvent::CompressedImageDetected { format } => {
+                            recognised = Some(format)
+                        }
+                        OperationEvent::PreflightProgress(progress) => {
+                            last_progress = Some(progress.logical_produced)
+                        }
+                        other => panic!("unexpected {other:?}"),
+                    },
                 )
                 .unwrap();
 
@@ -748,8 +1136,11 @@ mod tests {
                 image.path(),
                 VerifyMode::Quick,
                 &cancel,
-                |_| {},
-                |_| progress_calls += 1,
+                |event| {
+                    if let OperationEvent::PreflightProgress(_) = event {
+                        progress_calls += 1
+                    }
+                },
             );
             match result {
                 Err(PrepareImageError::CompressedImage(
@@ -846,11 +1237,11 @@ mod tests {
             "candidates::select_target(platform, target)",
             "core::revalidate(state, outcome)",
             "image_source::open_image(image_path)",
-            "on_compressed(compressed.format())",
+            "OperationEvent::CompressedImageDetected {",
             "prepare_compressed_image(",
             "core::revalidate(state, platform.fetch_snapshot(&target_block_path))",
             "image: SelectedImage::new(source)",
-            "if cancel.is_requested() {",
+            "return Err(CancelledBeforeConfirmation);",
             "confirmation_matches(typed, &baseline.device)",
             "WriteIntent::from_selection(&self.state, self.image.selection(), self.verify_mode)",
             "ConfirmationToken::confirm(intent)",
@@ -867,5 +1258,664 @@ mod tests {
         // The image path is opened once and never again.
         assert_eq!(source.matches("open_image(").count(), 1);
         assert_eq!(source.matches("File::open").count(), 0);
+    }
+
+    // ---- the whole operation (`run_on` with a scripted platform) ----
+
+    // Records every event by name, answers the confirmation with `answer`,
+    // and can request cancellation when a given event arrives (or in the
+    // test-only pause hook).
+    struct TestObserver {
+        answer: Option<ConfirmationDecision>,
+        events: Vec<String>,
+        cancel_on: Option<(&'static str, CancelHandle)>,
+        pause: Option<bool>,
+    }
+
+    impl TestObserver {
+        fn answering(typed: &str) -> Self {
+            TestObserver::deciding(ConfirmationDecision::Submitted(typed.to_string()))
+        }
+
+        fn deciding(answer: ConfirmationDecision) -> Self {
+            TestObserver {
+                answer: Some(answer),
+                events: Vec::new(),
+                cancel_on: None,
+                pause: None,
+            }
+        }
+
+        fn saw(&self, name: &str) -> bool {
+            self.events.iter().any(|event| event == name)
+        }
+    }
+
+    fn event_name(event: &OperationEvent<'_>) -> String {
+        let debug = format!("{event:?}");
+        debug
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    impl OperationObserver for TestObserver {
+        fn on_event(&mut self, event: OperationEvent<'_>) {
+            let name = event_name(&event);
+            if let Some((trigger, cancel)) = &self.cancel_on {
+                if name == *trigger {
+                    cancel.request_cancel(CancelReason::UserRequested);
+                }
+            }
+            self.events.push(name);
+        }
+
+        fn request_confirmation(
+            &mut self,
+            request: &ConfirmationRequest<'_>,
+        ) -> ConfirmationDecision {
+            assert_eq!(request.expected_text, "/dev/sdx");
+            self.events.push("ConfirmationRequested".to_string());
+            self.answer.take().expect("asked for confirmation twice")
+        }
+
+        fn pause_before_verify(&mut self) -> bool {
+            self.events.push("PauseBeforeVerify".to_string());
+            match self.pause {
+                Some(answer) => answer,
+                None => true,
+            }
+        }
+    }
+
+    fn target_file(tag: &str) -> TempImage {
+        temp_image(tag, "device", b"")
+    }
+
+    fn device(target: &TempImage) -> Device {
+        Device {
+            path: target.0.clone(),
+            ..Device::default()
+        }
+    }
+
+    // The snapshots a complete run reads: select, the immediate re-check,
+    // the post-Preflight re-check (compressed only), the fresh Write Gate,
+    // and Verify's re-check (Quick / Full only).
+    fn snapshots(compressed: bool, verify: bool) -> Vec<SnapshotFetchOutcome> {
+        let count = 3 + usize::from(compressed) + usize::from(verify);
+        (0..count).map(|_| found(usb_stick())).collect()
+    }
+
+    fn run(
+        platform: &ScriptedPlatform,
+        image: &TempImage,
+        verify_mode: VerifyMode,
+        cancel: &CancelHandle,
+        observer: &mut TestObserver,
+    ) -> OperationOutcome {
+        run_on(
+            platform,
+            WriteOperationRequest {
+                target: cli_target(),
+                image_path: image.path().to_string(),
+                verify_mode,
+            },
+            cancel,
+            observer,
+        )
+    }
+
+    fn contents(file: &TempImage) -> Vec<u8> {
+        std::fs::read(&file.0).unwrap()
+    }
+
+    // 26.1 - 26.7 and 26.17 / 26.18: raw (None / Quick / Full), gzip and xz
+    // (None / Full) complete; the target holds the image; the Verify FD is
+    // opened (read-only, O_DIRECT access) only for Quick / Full, and only
+    // after the write FD is closed; the events arrive in the fixed order.
+    #[test]
+    fn every_supported_image_and_verify_mode_completes() {
+        let data = payload();
+        let cases = [
+            ("img", data.clone(), false, VerifyMode::None),
+            ("img", data.clone(), false, VerifyMode::Quick),
+            ("img", data.clone(), false, VerifyMode::Full),
+            ("img.gz", gzip(&data), true, VerifyMode::None),
+            ("img.gz", gzip(&data), true, VerifyMode::Full),
+            ("img.xz", xz(&data), true, VerifyMode::None),
+            ("img.xz", xz(&data), true, VerifyMode::Full),
+        ];
+        for (extension, image_bytes, compressed, mode) in cases {
+            let label = format!("{extension} {mode:?}");
+            let image = temp_image("run", extension, &image_bytes);
+            let target = target_file("run");
+            let verify = mode != VerifyMode::None;
+            let platform =
+                ScriptedPlatform::with_device(snapshots(compressed, verify), device(&target));
+            let mut observer = TestObserver::answering("/dev/sdx\n");
+
+            let outcome = run(&platform, &image, mode, &CancelHandle::new(), &mut observer);
+
+            match outcome {
+                OperationOutcome::Completed {
+                    verify: result,
+                    image_size,
+                } => {
+                    assert_eq!(result.mode, mode, "{label}");
+                    assert_eq!(result.skipped, !verify, "{label}");
+                    assert_eq!(image_size, data.len() as u64, "{label}");
+                    if mode == VerifyMode::Full {
+                        assert_eq!(result.verified_bytes, data.len() as u64, "{label}");
+                    }
+                }
+                other => panic!("{label}: {other:?}"),
+            }
+            assert_eq!(contents(&target), data, "{label}");
+            assert_eq!(
+                platform.fetches(),
+                snapshots(compressed, verify).len(),
+                "{label}"
+            );
+            if verify {
+                assert_eq!(
+                    platform.opens(),
+                    [OpenAccess::WriteExclusive, OpenAccess::ReadOnlyDirect],
+                    "{label}"
+                );
+                assert_eq!(*platform.fds_open_at_verify.borrow(), [0], "{label}");
+            } else {
+                assert_eq!(platform.opens(), [OpenAccess::WriteExclusive], "{label}");
+                assert!(!observer.saw("VerifyPending"), "{label}");
+            }
+
+            let mut expected = vec!["TargetSelected"];
+            if compressed {
+                expected.push("CompressedImageDetected");
+            }
+            expected.extend(["ImageSelected", "ConfirmationRequested", "Confirmed"]);
+            expected.extend([
+                "WriteGatePassed",
+                "OpeningDevice",
+                "DeviceOpened",
+                "FdBound",
+            ]);
+            expected.extend(["WriteAuthorized", "ImageBound", "WriteStarted"]);
+            expected.extend(["WriteSucceeded", "SyncStarted", "SyncSucceeded"]);
+            if verify {
+                expected.extend([
+                    "VerifyPending",
+                    "PauseBeforeVerify",
+                    "VerifySnapshotRequested",
+                ]);
+                expected.extend(["VerifyTargetChecked", "OpeningDevice", "DeviceOpened"]);
+                expected.extend(["FdBound", "VerifyStarted"]);
+            }
+            let seen: Vec<&str> = observer
+                .events
+                .iter()
+                .map(String::as_str)
+                .filter(|name| {
+                    !matches!(
+                        *name,
+                        "PreflightProgress" | "WriteProgress" | "VerifyProgress"
+                    )
+                })
+                .collect();
+            assert_eq!(seen, expected, "{label}");
+            assert!(observer.saw("WriteProgress"), "{label}");
+            assert_eq!(observer.saw("PreflightProgress"), compressed, "{label}");
+            assert_eq!(observer.saw("VerifyProgress"), verify, "{label}");
+        }
+    }
+
+    // 26.8: a wrong confirmation (and no answer at all) never reaches the
+    // Write Gate or OpenDevice.
+    #[test]
+    fn without_a_matching_confirmation_nothing_is_opened() {
+        let image = temp_image("confirm-run", "img", &payload());
+        for (decision, cancelled) in [
+            (
+                ConfirmationDecision::Submitted("/dev/sdy".to_string()),
+                false,
+            ),
+            (ConfirmationDecision::Submitted("yes".to_string()), false),
+            (ConfirmationDecision::InputClosed, false),
+            (
+                ConfirmationDecision::InputFailed(std::io::Error::other("simulated")),
+                false,
+            ),
+            (ConfirmationDecision::Cancelled, true),
+        ] {
+            let target = target_file("confirm-run");
+            let platform = ScriptedPlatform::with_device(snapshots(false, false), device(&target));
+            let mut observer = TestObserver::deciding(decision);
+            let outcome = run(
+                &platform,
+                &image,
+                VerifyMode::Full,
+                &CancelHandle::new(),
+                &mut observer,
+            );
+
+            match (&outcome, cancelled) {
+                (OperationOutcome::Cancelled(CancelledAt::Confirmation), true) => {}
+                (
+                    OperationOutcome::Failed(
+                        OperationError::Confirmation(ConfirmError::Mismatch)
+                        | OperationError::ConfirmationInputClosed
+                        | OperationError::ConfirmationInputFailed(_),
+                    ),
+                    false,
+                ) => {}
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(platform.fetches(), 2);
+            assert!(platform.opens().is_empty());
+            assert!(contents(&target).is_empty());
+        }
+    }
+
+    // 26.9: the fresh Write Gate refuses a target that changed after the
+    // confirmation; OpenDevice is never requested.
+    #[test]
+    fn a_fresh_gate_refusal_stops_before_opendevice() {
+        let image = temp_image("gate-run", "img", &payload());
+        let target = target_file("gate-run");
+        let platform = ScriptedPlatform::with_device(
+            vec![found(usb_stick()), found(usb_stick()), found(recreated())],
+            device(&target),
+        );
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::None,
+            &CancelHandle::new(),
+            &mut TestObserver::answering("/dev/sdx"),
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::WriteGate(WriteGateError::InstanceRecreated))
+        ));
+        assert!(platform.opens().is_empty());
+    }
+
+    // 26.10: an OpenDevice failure keeps OpenDevice's own error, and the
+    // Write Gate's verdict on it.
+    #[test]
+    fn a_write_opendevice_failure_is_kept_in_the_outcome() {
+        let image = temp_image("open-run", "img", &payload());
+        let target = target_file("open-run");
+        let platform = ScriptedPlatform::with_device(
+            snapshots(false, false),
+            Device {
+                fail: vec![OpenAccess::WriteExclusive],
+                ..device(&target)
+            },
+        );
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::Full,
+            &CancelHandle::new(),
+            &mut TestObserver::answering("/dev/sdx"),
+        );
+        match outcome {
+            OperationOutcome::Failed(OperationError::WriteDeviceRejected {
+                error: WriteGateError::OpenDeviceFailed,
+                open_device: Some(OpenDeviceError::Connection(message)),
+            }) => assert_eq!(message, "simulated"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
+        assert!(contents(&target).is_empty());
+    }
+
+    // 26.11: an FD that is not bound to the re-verified device is refused
+    // and closed; nothing is written.
+    #[test]
+    fn an_fd_binding_mismatch_writes_nothing() {
+        let image = temp_image("binding-run", "img", &payload());
+        let target = target_file("binding-run");
+        let platform = ScriptedPlatform::with_device(
+            snapshots(false, false),
+            Device {
+                wrong_metadata: true,
+                ..device(&target)
+            },
+        );
+        let mut observer = TestObserver::answering("/dev/sdx");
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::None,
+            &CancelHandle::new(),
+            &mut observer,
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::WriteDeviceRejected {
+                error: WriteGateError::FdBindingMismatch,
+                open_device: None,
+            })
+        ));
+        assert!(!observer.saw("WriteStarted"));
+        assert!(contents(&target).is_empty());
+        assert_eq!(fds_pointing_at(&target.0), 0);
+    }
+
+    // 26.12: a write failure is a failure (not a cancellation), with the
+    // writer's own error; sync and Verify are not reached.
+    #[test]
+    fn a_write_failure_is_reported_with_its_cause() {
+        let image = temp_image("write-fail", "img", &payload());
+        let target = target_file("write-fail");
+        let platform = ScriptedPlatform::with_device(
+            snapshots(false, false),
+            Device {
+                read_only_write_fd: true,
+                ..device(&target)
+            },
+        );
+        let mut observer = TestObserver::answering("/dev/sdx");
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::Full,
+            &CancelHandle::new(),
+            &mut observer,
+        );
+        match &outcome {
+            OperationOutcome::Failed(OperationError::Write { failed, image_size }) => {
+                assert_eq!(failed.stage, WriteStage::Writing);
+                assert!(failed.target_may_be_modified);
+                assert_eq!(*image_size, payload().len() as u64);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!outcome.is_cancelled());
+        assert!(!observer.saw("SyncStarted"));
+        assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
+    }
+
+    // 26.13: a cancellation during the write stops it at the writer's own
+    // per-chunk check; nothing is synced or verified.
+    #[test]
+    fn a_cancellation_during_the_write_stops_it() {
+        let data: Vec<u8> = (0..3 * 1024 * 1024u32).map(|i| (i % 249) as u8).collect();
+        let image = temp_image("cancel-write", "img", &data);
+        let target = target_file("cancel-write");
+        let platform = ScriptedPlatform::with_device(snapshots(false, false), device(&target));
+        let cancel = CancelHandle::new();
+        let mut observer = TestObserver::answering("/dev/sdx");
+        observer.cancel_on = Some(("WriteProgress", cancel.clone()));
+
+        match run(&platform, &image, VerifyMode::Full, &cancel, &mut observer) {
+            OperationOutcome::Cancelled(CancelledAt::Write {
+                cancelled,
+                image_size,
+            }) => {
+                assert!(cancelled.bytes_written < data.len() as u64);
+                assert_eq!(image_size, data.len() as u64);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!observer.saw("SyncStarted"));
+        assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
+    }
+
+    // 26.14: a cancellation while syncing is honoured after the sync
+    // succeeded -- for every Verify mode -- and Verify does not start.
+    #[test]
+    fn a_cancellation_during_sync_stops_before_verify() {
+        for mode in [VerifyMode::None, VerifyMode::Full] {
+            let image = temp_image("cancel-sync", "img", &payload());
+            let target = target_file("cancel-sync");
+            let platform = ScriptedPlatform::with_device(snapshots(false, false), device(&target));
+            let cancel = CancelHandle::new();
+            let mut observer = TestObserver::answering("/dev/sdx");
+            observer.cancel_on = Some(("SyncStarted", cancel.clone()));
+
+            assert!(matches!(
+                run(&platform, &image, mode, &cancel, &mut observer),
+                OperationOutcome::Cancelled(CancelledAt::AfterSync)
+            ));
+            assert!(observer.saw("SyncSucceeded"));
+            assert!(!observer.saw("VerifyPending"));
+            assert_eq!(contents(&target), payload());
+            assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
+        }
+    }
+
+    // The existing check before Verify (after the test-only pause): a
+    // cancellation there stops before Verify reads anything; a pause without
+    // input stops too. Neither opens the Verify FD.
+    #[test]
+    fn verify_does_not_start_after_a_late_cancellation_or_an_ended_pause() {
+        for pause in [None, Some(false)] {
+            let image = temp_image("before-verify", "img", &payload());
+            let target = target_file("before-verify");
+            let platform = ScriptedPlatform::with_device(snapshots(false, false), device(&target));
+            let cancel = CancelHandle::new();
+            let mut observer = TestObserver::answering("/dev/sdx");
+            observer.pause = pause;
+            if pause.is_none() {
+                observer.cancel_on = Some(("VerifyPending", cancel.clone()));
+            }
+
+            let outcome = run(&platform, &image, VerifyMode::Full, &cancel, &mut observer);
+            match (pause, &outcome) {
+                (None, OperationOutcome::Cancelled(CancelledAt::BeforeVerify)) => {}
+                (
+                    Some(false),
+                    OperationOutcome::Failed(OperationError::VerifyNotStarted(
+                        VerifyNotStarted::TestPauseEnded,
+                    )),
+                ) => {}
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
+        }
+    }
+
+    // 26.15: after a successful write + sync, a Verify that cannot start is
+    // a structured failure: a refused re-check (with or without diagnostics)
+    // or a failed OpenDevice (keeping OpenDevice's error).
+    #[test]
+    fn verify_start_failures_are_structured() {
+        let image = temp_image("verify-start", "img", &payload());
+
+        let target = target_file("verify-start");
+        let mut answers = snapshots(false, false);
+        answers.push(found(recreated()));
+        let platform = ScriptedPlatform::with_device(answers, device(&target));
+        match run(
+            &platform,
+            &image,
+            VerifyMode::Full,
+            &CancelHandle::new(),
+            &mut TestObserver::answering("/dev/sdx"),
+        ) {
+            OperationOutcome::Failed(OperationError::VerifyNotStarted(
+                VerifyNotStarted::TargetCheck {
+                    error: crate::execution::write_job::VerifyStartError::InstanceRecreated,
+                    diagnostics: Some(_),
+                    ..
+                },
+            )) => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
+
+        let target = target_file("verify-start");
+        let mut answers = snapshots(false, false);
+        answers.push(SnapshotFetchOutcome::NotFound);
+        let platform = ScriptedPlatform::with_device(answers, device(&target));
+        assert!(matches!(
+            run(
+                &platform,
+                &image,
+                VerifyMode::Full,
+                &CancelHandle::new(),
+                &mut TestObserver::answering("/dev/sdx"),
+            ),
+            OperationOutcome::Failed(OperationError::VerifyNotStarted(
+                VerifyNotStarted::TargetCheck {
+                    diagnostics: None,
+                    ..
+                }
+            ))
+        ));
+
+        let target = target_file("verify-start");
+        let platform = ScriptedPlatform::with_device(
+            snapshots(false, true),
+            Device {
+                fail: vec![OpenAccess::ReadOnlyDirect],
+                ..device(&target)
+            },
+        );
+        match run(
+            &platform,
+            &image,
+            VerifyMode::Full,
+            &CancelHandle::new(),
+            &mut TestObserver::answering("/dev/sdx"),
+        ) {
+            OperationOutcome::Failed(OperationError::VerifyNotStarted(
+                VerifyNotStarted::Start {
+                    error: crate::execution::write_job::VerifyStartError::OpenDeviceFailed,
+                    open_device: Some(OpenDeviceError::Connection(_)),
+                    image_size,
+                },
+            )) => assert_eq!(image_size, payload().len() as u64),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(contents(&target), payload());
+    }
+
+    // 26.16: a target whose content differs from the image fails Verify
+    // with the first mismatching byte.
+    #[test]
+    fn a_verify_mismatch_is_a_structured_failure() {
+        let data = payload();
+        let image = temp_image("mismatch-run", "img", &data);
+        let target = target_file("mismatch-run");
+        let mut tampered = data.clone();
+        tampered[1000] ^= 0xff;
+        let other_device = temp_image("mismatch-run-read", "device", &tampered);
+        let platform = ScriptedPlatform::with_device(
+            snapshots(false, true),
+            Device {
+                verify_from: Some(other_device.0.clone()),
+                ..device(&target)
+            },
+        );
+        match run(
+            &platform,
+            &image,
+            VerifyMode::Full,
+            &CancelHandle::new(),
+            &mut TestObserver::answering("/dev/sdx"),
+        ) {
+            OperationOutcome::Failed(OperationError::Verify { failed, image_size }) => {
+                assert!(matches!(
+                    failed.reason,
+                    VerifyFailureReason::Mismatch { offset: 1000, .. }
+                ));
+                assert_eq!(image_size, data.len() as u64);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // A compressed image with Quick Verify is refused at L1 by the
+    // operation too: nothing is decoded, nothing is opened on the target.
+    #[test]
+    fn the_operation_refuses_quick_verify_for_a_compressed_image() {
+        let image = temp_image("quick-run", "img.xz", &xz(&payload()));
+        let target = target_file("quick-run");
+        let platform = ScriptedPlatform::with_device(snapshots(false, false), device(&target));
+        let mut observer = TestObserver::answering("/dev/sdx");
+        assert!(matches!(
+            run(
+                &platform,
+                &image,
+                VerifyMode::Quick,
+                &CancelHandle::new(),
+                &mut observer
+            ),
+            OperationOutcome::Failed(OperationError::Image(PrepareImageError::CompressedImage(
+                CompressedImageRejection::QuickVerifyUnsupported(CompressionFormat::Xz)
+            )))
+        ));
+        assert!(!observer.saw("PreflightProgress"));
+        assert!(!observer.saw("ConfirmationRequested"));
+        assert!(platform.opens().is_empty());
+    }
+
+    // The whole production path, checked on the source of `run_on`: every
+    // step in this order, the two OpenDevice calls with their access, and
+    // the cancel points -- exactly the existing ones.
+    #[test]
+    fn the_production_path_runs_in_order() {
+        let source = include_str!("operation.rs");
+        let production = &source[..source.find("\n#[cfg(test)]\nmod tests {").unwrap()];
+        let run_on = &production[production.find("\nfn run_on(").unwrap()..];
+        let steps = [
+            "select_write_target(platform, &target)",
+            "selected_target.prepare_image(",
+            "image.request_confirmation(cancel)",
+            "observer.request_confirmation(&pending.request())",
+            "pending.confirm(&typed)",
+            "platform.fetch_snapshot(operation.target_block_path())",
+            "operation.fresh_gate(refreshed)",
+            "platform.open_device(&ready.current().block_path, OpenAccess::WriteExclusive)",
+            "platform.fd_metadata(&handle)",
+            "core::finalize_prepared_write(ready, handle, metadata.as_ref())",
+            "operation.bind(prepared.begin())",
+            "execution.begin_write(cancel.clone())",
+            "writing.write(",
+            "run_off_main_thread(succeeded.begin_sync()",
+            "after_successful_sync(cancel.is_requested())",
+            "synced.begin_verify(image, cancel.clone())",
+            "VerifyStart::Skipped",
+            "VerifyStart::Pending",
+            "observer.pause_before_verify()",
+            "return Cancelled(CancelledAt::BeforeVerify)",
+            "platform.fetch_snapshot(pending.block_path())",
+            "pending.check_target(refreshed)",
+            "platform.open_device(ready.block_path(), OpenAccess::ReadOnlyDirect)",
+            "platform.fd_metadata(&handle)",
+            "ready.finalize(handle, metadata.as_ref())",
+            "verifying.run(",
+        ];
+        let mut at = 0;
+        for step in steps {
+            let found = run_on[at..]
+                .find(step)
+                .unwrap_or_else(|| panic!("{step} is missing or out of order"));
+            at += found + step.len();
+        }
+
+        assert_eq!(production.matches("OpenAccess::WriteExclusive").count(), 1);
+        assert_eq!(production.matches("OpenAccess::ReadOnlyDirect").count(), 1);
+        assert_eq!(production.matches("platform.open_device(").count(), 2);
+
+        // The cancel points: one return per existing point, and no other
+        // cancellation check in the sequence.
+        for point in [
+            "Cancelled(CancelledAt::Preflight)",
+            "Cancelled(CancelledAt::BeforeConfirmation)",
+            "Cancelled(CancelledAt::Confirmation)",
+            "Cancelled(CancelledAt::Write {",
+            "Cancelled(CancelledAt::AfterSync)",
+            "Cancelled(CancelledAt::BeforeVerify)",
+            "Cancelled(CancelledAt::Verify {",
+        ] {
+            assert_eq!(run_on.matches(point).count(), 1, "{point}");
+        }
+        assert_eq!(run_on.matches("if cancel.is_requested()").count(), 1);
     }
 }

@@ -1,21 +1,24 @@
 // Production orchestration (Core layer; see CLAUDE.md). The safe write
-// procedure's own steps -- the order of selection, image preparation,
-// confirmation, the Write Gate, write, sync and Verify -- are meant to live
-// here, so that the CLI and a future GUI both drive the same path. Phase
-// 3A-1 only moves the pure helpers here, unchanged; `main.rs`'s
-// `run_write_test` still performs the sequence itself and calls them. Not a
-// public API: nothing here is visible outside this crate.
+// procedure itself -- the order of selection, image preparation,
+// confirmation, the Write Gate, OpenDevice, FD binding, write, sync and
+// Verify -- lives here (`operation::run_write_operation`), so that the CLI
+// and a future GUI both drive the same path and only observe it
+// (`events::OperationObserver`, `outcome::OperationOutcome`). The device list
+// is `candidates`. Not a public API: nothing here is visible outside this
+// crate.
 
 pub(crate) mod candidates;
+pub(crate) mod events;
 pub(crate) mod image;
 pub(crate) mod operation;
+pub(crate) mod outcome;
 pub(crate) mod platform;
 pub(crate) mod sync_worker;
 
-// Pure comparison used by the Human Confirmation prompt in `main.rs`'s
-// `run_write_test`: the operator's raw input line, trimmed, must equal the
-// target's `/dev` node string exactly -- case-sensitive, no partial/prefix
-// match, no "y"/"yes" shortcut. Kept as its own small function (rather than
+// Pure comparison behind the Human Confirmation
+// (`operation::PendingConfirmation::confirm`): the typed line, trimmed, must
+// equal the target's `/dev` node string exactly -- case-sensitive, no
+// partial/prefix match, no "y"/"yes" shortcut. Kept as its own small function (rather than
 // inlined) purely so it can be unit tested without stdin or a real device.
 pub(crate) fn confirmation_matches(input: &str, expected_device: &str) -> bool {
     input.trim() == expected_device
@@ -75,7 +78,7 @@ mod tests {
     }
 
     // E. Empty input (including EOF, which this function never sees
-    // directly since `run_write_test` special-cases it, but an empty
+    // directly since it is reported as no answer at all, but an empty
     // trimmed string must still never match a non-empty device) -> false.
     #[test]
     fn empty_input_does_not_confirm() {

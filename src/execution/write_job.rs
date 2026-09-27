@@ -109,13 +109,14 @@
 //     Verify -- O_DIRECT alone keeps Verify's reads off the page cache, see
 //     `Verifying::run()`'s doc comment
 //
-// Production caller: `main.rs`'s `run_write_test` (`write-test`) drives this
-// whole state machine end to end, from `AuthorizedExecution::bind()` through
-// `Verifying::run()`. Nothing in this module ever calls
-// `linux_backend::collect_device_snapshot()` or `linux_access::open_device()`
-// itself: exactly like the write path, `check_target()`/`finalize()` (above)
-// take their results as caller-supplied parameters, and `main.rs` performs
-// those calls -- `open_device(OpenAccess::WriteExclusive)` for the write,
+// Production caller: `orchestration::operation::run_write_operation` (which
+// `main.rs`'s `write-test` runs) drives this whole state machine end to end,
+// from `AuthorizedExecution::bind()` through `Verifying::run()`. Nothing in
+// this module ever calls `linux_backend::collect_device_snapshot()` or
+// `linux_access::open_device()` itself: exactly like the write path,
+// `check_target()`/`finalize()` (above) take their results as caller-supplied
+// parameters, and the orchestration performs those calls --
+// `open_device(OpenAccess::WriteExclusive)` for the write,
 // `open_device(OpenAccess::ReadOnlyDirect)` for Verify.
 //
 // The module-level `allow(dead_code)` below predates that wiring. What it
@@ -1295,9 +1296,9 @@ impl SyncSucceeded {
     // (see `WritingExecution::write()`'s own doc comment for why: it is
     // returned to the caller alongside `WriteAttemptOutcome` well before
     // `Syncing`/`SyncSucceeded` exist, and the caller is the one expected to
-    // hold onto it across the sync stage, exactly as `main.rs`'s own
-    // `run_write_test` PoC already does with its local `selected_image`
-    // variable) -- so it must be supplied here.
+    // hold onto it across the sync stage, exactly as
+    // `orchestration::operation::run_on` does with the `SelectedImage` that
+    // `write()` returned) -- so it must be supplied here.
     //
     // Retires the write-mode capability unconditionally, for every
     // `VerifyMode` including `None`: `self.active` is dropped (after reading
@@ -4954,7 +4955,7 @@ mod tests {
         }
     }
 
-    // The production preparation, as `run_write_test` does it, with the
+    // The production preparation, as the write operation does it, with the
     // target's capacity as the Preflight limit.
     fn prepared_gzip_image(
         path: &std::path::Path,
