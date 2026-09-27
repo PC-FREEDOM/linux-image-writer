@@ -1,0 +1,51 @@
+# Phase 3B-0A PoC manifest (not a Flathub manifest). Builds poc/gtk against
+# the Production library from this repository and grants only what the
+# device list needs: the UDisks2 name on the system bus. No --device, no
+# --filesystem, no --socket=system-bus.
+#
+# The build shares the network so cargo can fetch crates; a Flathub build
+# must use offline cargo sources (flatpak-cargo-generator) instead.
+#
+# The unmodified Production CLI is installed next to the PoC so that its
+# existing diagnostic `open-test` (selection + Safety re-validation ->
+# OpenDevice -> FD metadata check -> close without writing) can be run
+# inside this same sandbox: flatpak run --command=linux-usb-writer ...
+id: io.github.pcfreedom.LinuxUsbWriter.GtkPoc
+runtime: org.gnome.Platform
+runtime-version: "50"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: gtk-poc
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --system-talk-name=org.freedesktop.UDisks2
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/gtk-poc/cargo
+modules:
+  - name: gtk-poc
+    buildsystem: simple
+    build-commands:
+      - cd poc/gtk && cargo build --release --locked
+      - install -Dm755 poc/gtk/target/release/gtk-poc /app/bin/gtk-poc
+      - cargo build --release --locked --bin linux-usb-writer
+      - install -Dm755 target/release/linux-usb-writer /app/bin/linux-usb-writer
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - reports
+          - poc/gtk/target
+          - poc/gtk/.flatpak-builder
+          - poc/gtk/build-dir
+          - poc/gtk/repo
+          - poc/gtk/appimage
