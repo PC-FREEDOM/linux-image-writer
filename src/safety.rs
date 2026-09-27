@@ -1,13 +1,13 @@
 use crate::device::DeviceSnapshot;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RiskLevel {
     Normal,
     Caution,
     Blocked,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RiskReason {
     SystemDevice,
     CriticalMount,
@@ -22,7 +22,7 @@ pub enum RiskReason {
     MediaUnavailable,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SafetyAssessment {
     pub risk_level: RiskLevel,
     pub writable: bool,

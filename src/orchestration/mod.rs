@@ -14,6 +14,9 @@ pub(crate) mod operation;
 pub(crate) mod outcome;
 pub(crate) mod platform;
 pub(crate) mod sync_worker;
+#[cfg(test)]
+mod test_support;
+pub(crate) mod worker;
 
 // Pure comparison behind the Human Confirmation
 // (`operation::PendingConfirmation::confirm`): the typed line, trimmed, must
