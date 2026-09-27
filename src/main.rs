@@ -4,6 +4,7 @@ mod identity;
 mod image_source;
 mod linux_backend;
 mod linux_monitor;
+mod orchestration;
 mod safety;
 mod writer;
 
@@ -12,6 +13,7 @@ use execution::{core, linux_access, write_job};
 use identity::{compare_identity, compare_instance, IdentityComparison, InstanceComparison};
 use linux_backend::{collect_device_snapshot, collect_device_snapshots};
 use linux_monitor::{start_monitoring, DeviceEvent};
+use orchestration::image::CompressedImageRejection;
 use safety::assess_device;
 use std::io::Write as _;
 
@@ -615,15 +617,6 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-// Pure comparison used by the Human Confirmation prompt in `run_write_test`
-// below: the operator's raw input line, trimmed, must equal the target's
-// `/dev` node string exactly -- case-sensitive, no partial/prefix match, no
-// "y"/"yes" shortcut. Kept as its own small function (rather than inlined)
-// purely so it can be unit tested without stdin or a real device.
-fn confirmation_matches(input: &str, expected_device: &str) -> bool {
-    input.trim() == expected_device
-}
-
 // How often `wait_for_prompt_input` re-checks for cancellation while no
 // input has arrived yet. Bounds how long a Ctrl+C during the Human
 // Confirmation prompt can go unnoticed; small enough to feel immediate,
@@ -711,77 +704,6 @@ fn wait_for_prompt_input(
                 ));
             }
         }
-    }
-}
-
-// How a unit of blocking work handed to `run_off_main_thread` ended.
-// `NotStarted` hands the input back untouched (the worker thread could not
-// be created, so the work never began), letting the caller decide how to
-// proceed without having lost the value.
-#[derive(Debug)]
-enum OffMainThread<T, R> {
-    Finished(R),
-    Panicked,
-    NotStarted(T, std::io::Error),
-}
-
-// Runs `work(input)` on a dedicated, scoped worker thread and blocks the
-// calling (main) thread in `join()` until it finishes. Exists for
-// `Syncing::sync()`: `fsync()` on a block device keeps the calling thread
-// in uninterruptible sleep, and the kernel delivers a terminal SIGINT to the
-// main thread first -- so when the main thread itself was in `fsync()`,
-// ctrlc's OS-level handler only ran once `fsync()` returned, and the
-// `request_cancel()` its dispatch thread performs could lose the race
-// against the post-sync cancel check (see reports/latest.md). Waiting in
-// `join()` instead is an interruptible wait, so a Ctrl+C during sync is
-// handled while sync is still running. This narrows the window to a
-// Ctrl+C landing at (nearly) the same moment sync completes; it does not
-// make that residual race impossible.
-//
-// The work itself is never interrupted: `join()` always waits for it to
-// finish. A panic inside `work` is reported as `Panicked` rather than
-// propagated into the main thread; the input was consumed by the worker in
-// that case (its destructors ran there during unwinding).
-fn run_off_main_thread<T: Send, R: Send>(
-    input: T,
-    work: impl FnOnce(T) -> R + Send,
-) -> OffMainThread<T, R> {
-    let mut slot = Some(input);
-    let slot_ref = &mut slot;
-
-    let joined = std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("sync-worker".into())
-            .spawn_scoped(scope, move || {
-                let input = slot_ref
-                    .take()
-                    .expect("worker input is present until the worker takes it");
-                work(input)
-            })
-            .map(|handle| handle.join())
-    });
-
-    match joined {
-        Ok(Ok(result)) => OffMainThread::Finished(result),
-        Ok(Err(_panic_payload)) => OffMainThread::Panicked,
-        Err(spawn_error) => match slot.take() {
-            Some(input) => OffMainThread::NotStarted(input, spawn_error),
-            None => OffMainThread::Panicked,
-        },
-    }
-}
-
-// What `run_write_test` does right after sync reported success: stop as
-// `Cancelled` if a cancellation was requested (sync has already finished,
-// so the full image is on the target and only verification is skipped), or
-// `None` to continue into Verify. Deliberately only for the success path:
-// a sync failure is always reported as that failure, never masked by a
-// cancellation that happened at the same time.
-fn exit_after_successful_sync(cancel_requested: bool) -> Option<WriteTestExit> {
-    if cancel_requested {
-        Some(WriteTestExit::Cancelled)
-    } else {
-        None
     }
 }
 
@@ -1012,7 +934,7 @@ fn run_write_test(
                 "write-test: detected format: {} (compressed image); validating it before writing (nothing is written yet)",
                 compressed.format().name()
             );
-            let prepared = prepare_compressed_image(
+            let prepared = orchestration::image::prepare_compressed_image(
                 compressed,
                 verify_mode,
                 target_capacity,
@@ -1143,7 +1065,7 @@ fn run_write_test(
     };
 
     let confirmed = match prompt_input {
-        PromptInput::Line(input) => confirmation_matches(&input, &expected_device),
+        PromptInput::Line(input) => orchestration::confirmation_matches(&input, &expected_device),
         PromptInput::Eof => false, // EOF (e.g. stdin closed or redirected from an empty source): treat as "no answer given", never as an implicit yes.
         PromptInput::Error(error) => {
             println!("write-test: failed to read the confirmation input: {error}");
@@ -1346,9 +1268,12 @@ fn run_write_test(
             // this matters for a Ctrl+C pressed during sync. Sync is still
             // awaited to completion; it is never interrupted.
             let syncing = succeeded.begin_sync();
-            let sync_outcome = match run_off_main_thread(syncing, |syncing| syncing.sync()) {
-                OffMainThread::Finished(outcome) => outcome,
-                OffMainThread::NotStarted(syncing, error) => {
+            let sync_outcome = match orchestration::sync_worker::run_off_main_thread(
+                syncing,
+                |syncing| syncing.sync(),
+            ) {
+                orchestration::sync_worker::OffMainThread::Finished(outcome) => outcome,
+                orchestration::sync_worker::OffMainThread::NotStarted(syncing, error) => {
                     // Durability first: if no worker thread can be created,
                     // sync on this thread rather than skip it. A Ctrl+C
                     // during this sync may only be observed once it returns
@@ -1358,7 +1283,7 @@ fn run_write_test(
                     );
                     syncing.sync()
                 }
-                OffMainThread::Panicked => {
+                orchestration::sync_worker::OffMainThread::Panicked => {
                     for line in format_sync_worker_panicked() {
                         println!("write-test: {line}");
                     }
@@ -1385,11 +1310,13 @@ fn run_write_test(
                     // early cancel check further below. That later check
                     // stays: it still covers a cancellation arriving after
                     // this point (e.g. during the test-only pause).
-                    if let Some(exit) = exit_after_successful_sync(cancel.is_requested()) {
+                    if orchestration::after_successful_sync(cancel.is_requested())
+                        == orchestration::AfterSync::Cancelled
+                    {
                         for line in format_cancelled_after_sync() {
                             println!("write-test: {line}");
                         }
-                        return Ok(exit);
+                        return Ok(WriteTestExit::Cancelled);
                     }
 
                     // ---- Built-in Verify (self-contained: this arm always
@@ -2056,53 +1983,6 @@ fn format_cancelled_after_sync() -> Vec<String> {
     ]
 }
 
-// Why a compressed image was not accepted for writing. Every case stops
-// before the target is opened.
-#[derive(Debug)]
-enum CompressedImageRejection {
-    // Quick Verify needs random access, which a compressed image cannot
-    // provide; refused before Preflight (and before any confirmation).
-    QuickVerifyUnsupported(image_source::CompressionFormat),
-    // Preflight did not validate the image (includes cancellation).
-    Preflight(image_source::compressed::PreflightError),
-    // Preflight succeeded, but the file is no longer in the state it was
-    // opened in (compared with the snapshot `open_image` took).
-    SourceChanged(image_source::source_identity::SourceChanged),
-}
-
-// Turns an opened compressed image into the source the write pipeline reads
-// from: refuses Quick Verify first (L1), then validates the whole stream
-// (Preflight, bounded by `max_logical_size` -- the target's capacity -- and
-// cancellable via `is_cancelled`), then confirms the file did not change
-// while it was being validated. The file is the one `open_image` opened; it
-// is moved, never re-opened.
-fn prepare_compressed_image(
-    compressed: image_source::CompressedImageFile,
-    verify_mode: core::VerifyMode,
-    max_logical_size: u64,
-    is_cancelled: impl FnMut() -> bool,
-    on_progress: impl FnMut(image_source::compressed::PreflightProgress),
-) -> Result<image_source::compressed::CompressedImageSource, CompressedImageRejection> {
-    if verify_mode == core::VerifyMode::Quick {
-        return Err(CompressedImageRejection::QuickVerifyUnsupported(
-            compressed.format(),
-        ));
-    }
-
-    let options = image_source::compressed::PreflightOptions { max_logical_size };
-    let preflighted = compressed
-        .preflight(options, is_cancelled, on_progress)
-        .map_err(CompressedImageRejection::Preflight)?;
-
-    preflighted
-        .revalidate_identity()
-        .map_err(CompressedImageRejection::SourceChanged)?;
-
-    Ok(image_source::compressed::CompressedImageSource::new(
-        preflighted,
-    ))
-}
-
 fn format_preflight_progress(progress: &image_source::compressed::PreflightProgress) -> String {
     format!(
         "validating compressed image: {}/{} compressed bytes read, {} bytes decoded",
@@ -2346,16 +2226,15 @@ fn run_writer_test_inner(temp_path: &std::path::Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::confirmation_matches;
     use super::{
-        OffMainThread, PromptInput, WriteTestArgsError, WriteTestExit, exit_after_successful_sync,
-        format_cancelled_after_sync, format_cancelled_before_confirmation, format_hard_hazards,
-        format_identity_comparison, format_image_format_rejected, format_instance_comparison,
-        format_sync_worker_panicked, format_verify_cancelled, format_verify_cancelled_before_start,
+        PromptInput, WriteTestArgsError, WriteTestExit, format_cancelled_after_sync,
+        format_cancelled_before_confirmation, format_hard_hazards, format_identity_comparison,
+        format_image_format_rejected, format_instance_comparison, format_sync_worker_panicked,
+        format_verify_cancelled, format_verify_cancelled_before_start,
         format_verify_diagnostics_summary, format_verify_diagnostics_unavailable,
         format_verify_failure_reason, format_verify_succeeded, format_write_cancelled,
-        parse_verify_mode, parse_write_test_trailing_args, run_off_main_thread,
-        wait_for_prompt_input, write_test_exit_code,
+        parse_verify_mode, parse_write_test_trailing_args, wait_for_prompt_input,
+        write_test_exit_code,
     };
     use crate::device::DeviceSnapshot;
     use crate::execution::core::{self, HardHazardReason, VerifyMode};
@@ -2442,41 +2321,72 @@ mod tests {
         );
     }
 
-    // A. Exact match -> true.
+    // `run_write_test` still performs the safe sequence in the same order
+    // after its helpers moved to `orchestration` (Phase 3A-1): each step
+    // appears exactly once, in this order.
     #[test]
-    fn exact_match_confirms() {
-        assert!(confirmation_matches("/dev/sdb", "/dev/sdb"));
+    fn run_write_test_keeps_its_step_order() {
+        let write_test = production_fn_source("run_write_test");
+        let steps = [
+            "attempt_select(&block_path)",
+            "install_cancel_handler(cancel.clone())",
+            "image_source::open_image(&image_path)",
+            "orchestration::image::prepare_compressed_image(",
+            "state = core::revalidate(state, collect_device_snapshot(&target_block_path));",
+            "spawn_prompt_reader()",
+            "orchestration::confirmation_matches(&input, &expected_device)",
+            "core::WriteIntent::from_selection(",
+            "core::ConfirmationToken::confirm(intent)",
+            "let refreshed_for_gate = collect_device_snapshot(&baseline.block_path);",
+            "core::prepare_for_open(",
+            "linux_access::OpenAccess::WriteExclusive",
+            "core::finalize_prepared_write(",
+            "prepared.begin()",
+            "write_job::AuthorizedExecution::bind(",
+            "execution.begin_write(cancel.clone())",
+            "writing_execution.write(",
+            "succeeded.begin_sync()",
+            "orchestration::sync_worker::run_off_main_thread(",
+            "orchestration::after_successful_sync(cancel.is_requested())",
+            "sync_succeeded.begin_verify(selected_image, cancel.clone())",
+            "write_job::VerifyStart::Skipped",
+            "write_job::VerifyStart::Pending",
+            "pending.check_target(refreshed_for_verify)",
+            "linux_access::OpenAccess::ReadOnlyDirect",
+            "ready.finalize(handle_opt, metadata.as_ref())",
+            "verifying.run(",
+        ];
+        let mut previous = 0;
+        for step in steps {
+            assert_eq!(write_test.matches(step).count(), 1, "{step}");
+            let at = write_test.find(step).unwrap();
+            assert!(at > previous, "{step} is out of order");
+            previous = at;
+        }
     }
 
-    // B. A trailing newline (as `read_line` always includes one) is
-    // trimmed before comparing -> still true.
+    // A cancellation seen right after a successful sync still ends the run
+    // as `Cancelled` (exit 130), only on the sync-success path and before
+    // Verify begins.
     #[test]
-    fn trailing_newline_is_trimmed_before_comparing() {
-        assert!(confirmation_matches("/dev/sdb\n", "/dev/sdb"));
-        assert!(confirmation_matches("/dev/sdb\r\n", "/dev/sdb"));
-    }
+    fn a_cancellation_after_sync_still_exits_130() {
+        let write_test = production_fn_source("run_write_test");
+        let succeeded = write_test
+            .find("write_job::SyncAttemptOutcome::Succeeded(sync_succeeded)")
+            .unwrap();
+        let check = write_test
+            .find("orchestration::after_successful_sync(cancel.is_requested())")
+            .unwrap();
+        let begin_verify = write_test.find("sync_succeeded.begin_verify(").unwrap();
+        let failed = write_test
+            .find("write_job::SyncAttemptOutcome::Failed(failed)")
+            .unwrap();
+        assert!(succeeded < check && check < begin_verify && begin_verify < failed);
 
-    // C. A different, even superficially similar, device string -> false.
-    #[test]
-    fn wrong_device_does_not_confirm() {
-        assert!(!confirmation_matches("/dev/sdc", "/dev/sdb"));
-        assert!(!confirmation_matches("/dev/sdb1", "/dev/sdb"));
-    }
-
-    // D. No "y"/"yes" shortcut -- only the exact device string confirms.
-    #[test]
-    fn yes_or_y_does_not_confirm() {
-        assert!(!confirmation_matches("yes\n", "/dev/sdb"));
-        assert!(!confirmation_matches("y\n", "/dev/sdb"));
-    }
-
-    // E. Empty input (including EOF, which this function never sees
-    // directly since `run_write_test` special-cases it, but an empty
-    // trimmed string must still never match a non-empty device) -> false.
-    #[test]
-    fn empty_input_does_not_confirm() {
-        assert!(!confirmation_matches("", "/dev/sdb"));
-        assert!(!confirmation_matches("\n", "/dev/sdb"));
+        let branch = &write_test[check..begin_verify];
+        assert!(branch.contains("== orchestration::AfterSync::Cancelled"));
+        assert!(branch.contains("return Ok(WriteTestExit::Cancelled);"));
+        assert_eq!(write_test_exit_code(WriteTestExit::Cancelled), Some(130));
     }
 
     // ---------------------------------------------------------------------
@@ -3041,79 +2951,6 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // Sync off the main thread (S1): `run_off_main_thread` is exercised with
-    // plain closures standing in for `Syncing::sync()` -- no block device,
-    // no fsync. The real call site's `Syncing`/`SyncAttemptOutcome` Send
-    // bounds are enforced by the compiler at that call site itself.
-    // ---------------------------------------------------------------------
-
-    // S1a. A successful result is returned to the caller unchanged, and the
-    // work ran on a thread other than the caller's.
-    #[test]
-    fn off_main_thread_returns_success_from_another_thread() {
-        let caller = std::thread::current().id();
-
-        match run_off_main_thread(21u32, |value| (value * 2, std::thread::current().id())) {
-            OffMainThread::Finished((result, worker)) => {
-                assert_eq!(result, 42);
-                assert_ne!(worker, caller, "work must not run on the calling thread");
-            }
-            other => panic!("expected Finished, got {other:?}"),
-        }
-    }
-
-    // S1b. An error result (the stand-in for `SyncAttemptOutcome::Failed`) is
-    // returned as-is -- `Finished`, not `Panicked`: a failure the work
-    // reported is a result, not a crash.
-    #[test]
-    fn off_main_thread_returns_error_result_unchanged() {
-        let outcome = run_off_main_thread((), |()| -> Result<(), std::io::Error> {
-            Err(std::io::Error::other("sync failed"))
-        });
-
-        match outcome {
-            OffMainThread::Finished(Err(error)) => assert_eq!(error.to_string(), "sync failed"),
-            other => panic!("expected Finished(Err), got {other:?}"),
-        }
-    }
-
-    // S1c. A panic in the worker is reported as `Panicked` instead of
-    // propagating into the caller. (The panic message printed to stderr by
-    // the default hook is expected test output.)
-    #[test]
-    fn off_main_thread_reports_worker_panic() {
-        let outcome = run_off_main_thread((), |()| -> u32 {
-            panic!("simulated sync worker panic");
-        });
-
-        assert!(matches!(outcome, OffMainThread::Panicked));
-    }
-
-    // S1d. The caller blocks until the work has fully finished -- the work is
-    // never abandoned or interrupted, even if it takes a while.
-    #[test]
-    fn off_main_thread_waits_for_work_to_complete() {
-        let outcome = run_off_main_thread(Duration::from_millis(30), |delay| {
-            std::thread::sleep(delay);
-            "done"
-        });
-
-        assert!(matches!(outcome, OffMainThread::Finished("done")));
-    }
-
-    // S1e. After a successful sync: cancellation requested -> Cancelled
-    // (exit 130); not requested -> continue into Verify.
-    #[test]
-    fn exit_after_successful_sync_follows_cancel_flag() {
-        assert_eq!(
-            exit_after_successful_sync(true),
-            Some(WriteTestExit::Cancelled)
-        );
-        assert_eq!(write_test_exit_code(WriteTestExit::Cancelled), Some(130));
-        assert_eq!(exit_after_successful_sync(false), None);
-    }
-
     // S1f. A panicked sync worker is reported as a sync failure: it never
     // claims success or a full, synced image.
     #[test]
@@ -3348,460 +3185,14 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // gzip preparation (Quick L1, Preflight, post-Preflight source check)
-    // and the post-Preflight target re-check. All of this happens before
-    // the target is opened, so a rejection here cannot touch the target.
+    // Compressed image messages (rejection / Preflight progress) and the
+    // post-Preflight target re-check. The preparation itself, and its tests,
+    // are in `orchestration::image`.
     // ---------------------------------------------------------------------
 
-    use super::{
-        CompressedImageRejection, format_compressed_image_rejected, format_preflight_progress,
-        prepare_compressed_image,
-    };
+    use super::CompressedImageRejection;
+    use super::{format_compressed_image_rejected, format_preflight_progress};
     use crate::image_source::compressed::{PreflightError, PreflightProgress};
-    use crate::image_source::{
-        CompressedImageFile, ImageSource, ImageSourceAccess, OpenedImage, open_image,
-    };
-
-    // A temporary `.img.gz` file, removed when dropped.
-    struct TempGzip(std::path::PathBuf);
-
-    impl Drop for TempGzip {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    fn gzip_bytes(payload: &[u8]) -> Vec<u8> {
-        use std::io::Write as _;
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(payload).unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn temp_gzip(tag: &str, contents: &[u8]) -> TempGzip {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "linux-usb-writer-main-test-{tag}-{}-{id}.img.gz",
-            std::process::id()
-        ));
-        std::fs::write(&path, contents).unwrap();
-        TempGzip(path)
-    }
-
-    fn open_gzip(file: &TempGzip) -> CompressedImageFile {
-        match open_image(&file.0) {
-            Ok(OpenedImage::Compressed(compressed)) => compressed,
-            other => panic!("expected a compressed image, got {other:?}"),
-        }
-    }
-
-    fn payload() -> Vec<u8> {
-        (0..200_000u32).map(|i| (i % 253) as u8).collect()
-    }
-
-    // None and Full: the whole stream is validated, the source reports the
-    // decoded size and sequential access, and progress ends at the exact
-    // totals.
-    #[test]
-    fn prepare_compressed_image_accepts_valid_gzip_for_none_and_full() {
-        let data = payload();
-        let compressed = gzip_bytes(&data);
-        for mode in [VerifyMode::None, VerifyMode::Full] {
-            let file = temp_gzip("prepare-ok", &compressed);
-            let mut last = None;
-            let source = prepare_compressed_image(
-                open_gzip(&file),
-                mode,
-                data.len() as u64,
-                || false,
-                |progress| last = Some(progress),
-            )
-            .unwrap_or_else(|rejection| panic!("{mode:?}: {rejection:?}"));
-
-            assert_eq!(source.logical_size(), data.len() as u64);
-            assert_eq!(source.access(), ImageSourceAccess::SequentialReplay);
-            source.revalidate_identity().unwrap();
-            let last = last.expect("progress reported");
-            assert_eq!(last.logical_produced, data.len() as u64);
-            assert_eq!(last.compressed_consumed, compressed.len() as u64);
-        }
-    }
-
-    // L1: Quick is refused before any validation work (no cancellation
-    // poll, no progress) -- and never silently turned into Full or None.
-    #[test]
-    fn prepare_compressed_image_refuses_quick_before_validating() {
-        let file = temp_gzip("prepare-quick", &gzip_bytes(&payload()));
-        let result = prepare_compressed_image(
-            open_gzip(&file),
-            VerifyMode::Quick,
-            u64::MAX,
-            || panic!("Quick must be refused before Preflight polls for cancellation"),
-            |_| panic!("Quick must be refused before Preflight reports progress"),
-        );
-        assert!(matches!(
-            result,
-            Err(CompressedImageRejection::QuickVerifyUnsupported(
-                crate::image_source::CompressionFormat::Gzip
-            ))
-        ));
-    }
-
-    fn expect_preflight_error(
-        result: Result<
-            crate::image_source::compressed::CompressedImageSource,
-            CompressedImageRejection,
-        >,
-    ) -> PreflightError {
-        match result {
-            Err(CompressedImageRejection::Preflight(error)) => error,
-            Err(other) => panic!("expected a Preflight rejection, got {other:?}"),
-            Ok(_) => panic!("expected a Preflight rejection, got a source"),
-        }
-    }
-
-    // Cancellation during Preflight is reported as such (the CLI maps it to
-    // the Cancelled exit).
-    #[test]
-    fn prepare_compressed_image_can_be_cancelled() {
-        let file = temp_gzip("prepare-cancel", &gzip_bytes(&payload()));
-        let error = expect_preflight_error(prepare_compressed_image(
-            open_gzip(&file),
-            VerifyMode::None,
-            u64::MAX,
-            || true,
-            |_| {},
-        ));
-        assert!(matches!(error, PreflightError::Cancelled));
-    }
-
-    // Corrupt, truncated and oversized images are rejected with their typed
-    // Preflight reason; the size limit is the one passed in (the target's
-    // capacity) and allows an image of exactly that size.
-    #[test]
-    fn prepare_compressed_image_rejects_bad_images_with_typed_reasons() {
-        let data = payload();
-        let good = gzip_bytes(&data);
-
-        let mut corrupt = good.clone();
-        let crc = corrupt.len() - 8;
-        corrupt[crc] ^= 0xFF;
-        let file = temp_gzip("prepare-corrupt", &corrupt);
-        let error = expect_preflight_error(prepare_compressed_image(
-            open_gzip(&file),
-            VerifyMode::None,
-            u64::MAX,
-            || false,
-            |_| {},
-        ));
-        assert!(matches!(error, PreflightError::Corrupt(_)), "{error:?}");
-
-        let file = temp_gzip("prepare-truncated", &good[..good.len() / 2]);
-        let error = expect_preflight_error(prepare_compressed_image(
-            open_gzip(&file),
-            VerifyMode::Full,
-            u64::MAX,
-            || false,
-            |_| {},
-        ));
-        assert!(matches!(error, PreflightError::Incomplete(_)), "{error:?}");
-
-        let file = temp_gzip("prepare-oversized", &good);
-        let limit = data.len() as u64 - 1;
-        let error = expect_preflight_error(prepare_compressed_image(
-            open_gzip(&file),
-            VerifyMode::None,
-            limit,
-            || false,
-            |_| {},
-        ));
-        assert!(
-            matches!(error, PreflightError::LogicalSizeLimitExceeded { limit: l } if l == limit),
-            "{error:?}"
-        );
-
-        let file = temp_gzip("prepare-exact-limit", &good);
-        assert!(
-            prepare_compressed_image(
-                open_gzip(&file),
-                VerifyMode::None,
-                data.len() as u64,
-                || false,
-                |_| {},
-            )
-            .is_ok()
-        );
-    }
-
-    // The file changes while Preflight runs (at its final progress report):
-    // validation itself succeeds, but the source is refused because it is
-    // compared with the snapshot `open_image` took.
-    #[test]
-    fn prepare_compressed_image_refuses_a_source_changed_during_preflight() {
-        let compressed = gzip_bytes(&payload());
-        let file = temp_gzip("prepare-changed", &compressed);
-        let path = file.0.clone();
-        let data_len = payload().len() as u64;
-        let result = prepare_compressed_image(
-            open_gzip(&file),
-            VerifyMode::None,
-            u64::MAX,
-            || false,
-            |progress: PreflightProgress| {
-                if progress.logical_produced == data_len {
-                    use std::os::unix::fs::FileExt as _;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    let same = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-                    same.write_all_at(&compressed[..16], 0).unwrap();
-                }
-            },
-        );
-        assert!(
-            matches!(result, Err(CompressedImageRejection::SourceChanged(_))),
-            "{result:?}"
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // xz preparation: the same `prepare_compressed_image` as gzip -- the
-    // format only picks the decoder inside Preflight.
-    // ---------------------------------------------------------------------
-
-    // A temporary `.img.xz` file, removed when dropped.
-    struct TempXz(std::path::PathBuf);
-
-    impl Drop for TempXz {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    fn xz_bytes(payload: &[u8], check: liblzma::stream::Check) -> Vec<u8> {
-        use std::io::Write as _;
-        let stream = liblzma::stream::Stream::new_easy_encoder(0, check).unwrap();
-        let mut encoder = liblzma::write::XzEncoder::new_stream(Vec::new(), stream);
-        encoder.write_all(payload).unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn crc64_xz(payload: &[u8]) -> Vec<u8> {
-        xz_bytes(payload, liblzma::stream::Check::Crc64)
-    }
-
-    fn temp_xz(tag: &str, contents: &[u8]) -> TempXz {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "linux-usb-writer-main-test-{tag}-{}-{id}.img.xz",
-            std::process::id()
-        ));
-        std::fs::write(&path, contents).unwrap();
-        TempXz(path)
-    }
-
-    fn open_xz(file: &TempXz) -> CompressedImageFile {
-        match open_image(&file.0) {
-            Ok(OpenedImage::Compressed(compressed)) => {
-                assert_eq!(
-                    compressed.format(),
-                    crate::image_source::CompressionFormat::Xz
-                );
-                compressed
-            }
-            other => panic!("expected a compressed image, got {other:?}"),
-        }
-    }
-
-    fn prepare_xz(
-        tag: &str,
-        contents: &[u8],
-        mode: VerifyMode,
-        limit: u64,
-    ) -> Result<crate::image_source::compressed::CompressedImageSource, CompressedImageRejection>
-    {
-        let file = temp_xz(tag, contents);
-        prepare_compressed_image(open_xz(&file), mode, limit, || false, |_| {})
-    }
-
-    // Rewrites a single stream's Check ID (header and footer, CRC32s
-    // recomputed; same check-field size) or its first Block's LZMA2
-    // dictionary byte (Block Header CRC32 recomputed). Fixed .xz offsets of
-    // a stream this test just encoded.
-    fn xz_patched(stream: &[u8], check_id: Option<u8>, dictionary_byte: Option<u8>) -> Vec<u8> {
-        let crc32 = |bytes: &[u8]| {
-            let mut crc = flate2::Crc::new();
-            crc.update(bytes);
-            crc.sum().to_le_bytes()
-        };
-        let mut patched = stream.to_vec();
-        if let Some(id) = check_id {
-            let footer = patched.len() - 12;
-            patched[7] = id;
-            patched[footer + 9] = id;
-            let header_crc = crc32(&patched[6..8]);
-            patched[8..12].copy_from_slice(&header_crc);
-            let footer_crc = crc32(&patched[footer + 4..footer + 10]);
-            patched[footer..footer + 4].copy_from_slice(&footer_crc);
-        }
-        if let Some(byte) = dictionary_byte {
-            let header_len = (patched[12] as usize + 1) * 4;
-            assert_eq!(&patched[13..16], &[0x00, 0x21, 0x01], "one LZMA2 filter");
-            patched[16] = byte;
-            let crc_at = 12 + header_len - 4;
-            let crc = crc32(&patched[12..crc_at]);
-            patched[crc_at..crc_at + 4].copy_from_slice(&crc);
-        }
-        patched
-    }
-
-    // None and Full: a single stream, and concatenated streams with Stream
-    // Padding, are validated to their exact decoded size; the source is the
-    // same sequential-replay `CompressedImageSource` gzip produces.
-    #[test]
-    fn prepare_compressed_image_accepts_valid_xz_for_none_and_full() {
-        let data = payload();
-        let (half_a, half_b) = data.split_at(data.len() / 2);
-        let single = xz_bytes(&data, liblzma::stream::Check::Sha256);
-        let concatenated = [
-            crc64_xz(half_a),
-            vec![0u8; 8],
-            xz_bytes(half_b, liblzma::stream::Check::Crc32),
-            vec![0u8; 4],
-        ]
-        .concat();
-
-        for (name, compressed) in [("single", &single), ("concatenated", &concatenated)] {
-            for mode in [VerifyMode::None, VerifyMode::Full] {
-                let file = temp_xz(&format!("prepare-xz-{name}"), compressed);
-                let mut last = None;
-                let source = prepare_compressed_image(
-                    open_xz(&file),
-                    mode,
-                    data.len() as u64,
-                    || false,
-                    |progress| last = Some(progress),
-                )
-                .unwrap_or_else(|rejection| panic!("{name} {mode:?}: {rejection:?}"));
-
-                assert_eq!(source.logical_size(), data.len() as u64);
-                assert_eq!(source.access(), ImageSourceAccess::SequentialReplay);
-                source.revalidate_identity().unwrap();
-                let last = last.expect("progress reported");
-                assert_eq!(last.logical_produced, data.len() as u64);
-                assert_eq!(last.compressed_consumed, compressed.len() as u64);
-            }
-        }
-    }
-
-    // L1 for xz: Quick is refused before any validation work, and never
-    // turned into Full or None.
-    #[test]
-    fn prepare_compressed_image_refuses_quick_for_xz_before_validating() {
-        let file = temp_xz("prepare-xz-quick", &crc64_xz(&payload()));
-        let result = prepare_compressed_image(
-            open_xz(&file),
-            VerifyMode::Quick,
-            u64::MAX,
-            || panic!("Quick must be refused before Preflight polls for cancellation"),
-            |_| panic!("Quick must be refused before Preflight reports progress"),
-        );
-        assert!(matches!(
-            result,
-            Err(CompressedImageRejection::QuickVerifyUnsupported(
-                crate::image_source::CompressionFormat::Xz
-            ))
-        ));
-    }
-
-    // Bad xz images are refused by Preflight with their typed reason --
-    // before the target is opened.
-    #[test]
-    fn prepare_compressed_image_rejects_bad_xz_with_typed_reasons() {
-        let data = payload();
-        let good = crc64_xz(&data);
-        let reject = |tag: &str, contents: &[u8], limit: u64| {
-            expect_preflight_error(prepare_xz(tag, contents, VerifyMode::Full, limit))
-        };
-
-        let mut corrupt = good.clone();
-        let footer_crc = corrupt.len() - 12;
-        corrupt[footer_crc] ^= 0xFF;
-        let error = reject("prepare-xz-corrupt", &corrupt, u64::MAX);
-        assert!(matches!(error, PreflightError::Corrupt(_)), "{error:?}");
-
-        let error = reject("prepare-xz-truncated", &good[..good.len() / 2], u64::MAX);
-        assert!(matches!(error, PreflightError::Incomplete(_)), "{error:?}");
-
-        let none = xz_bytes(&data, liblzma::stream::Check::None);
-        let error = reject("prepare-xz-none", &none, u64::MAX);
-        assert!(
-            matches!(error, PreflightError::IntegrityCheckMissing),
-            "{error:?}"
-        );
-
-        let reserved = xz_patched(&good, Some(5), None);
-        let error = reject("prepare-xz-reserved", &reserved, u64::MAX);
-        assert!(
-            matches!(error, PreflightError::UnsupportedIntegrityCheck),
-            "{error:?}"
-        );
-
-        let huge_dictionary = xz_patched(&good, None, Some(40));
-        let error = reject("prepare-xz-memlimit", &huge_dictionary, u64::MAX);
-        assert!(
-            matches!(error, PreflightError::DecoderMemoryLimitExceeded { .. }),
-            "{error:?}"
-        );
-
-        let limit = data.len() as u64 - 1;
-        let error = reject("prepare-xz-oversized", &good, limit);
-        assert!(
-            matches!(error, PreflightError::LogicalSizeLimitExceeded { limit: l } if l == limit),
-            "{error:?}"
-        );
-        assert!(
-            prepare_xz(
-                "prepare-xz-exact",
-                &good,
-                VerifyMode::None,
-                data.len() as u64
-            )
-            .is_ok()
-        );
-    }
-
-    // Post-Preflight source check for xz: the file changes during Preflight
-    // (at its final progress report) and the source is refused.
-    #[test]
-    fn prepare_compressed_image_refuses_an_xz_source_changed_during_preflight() {
-        let compressed = crc64_xz(&payload());
-        let file = temp_xz("prepare-xz-changed", &compressed);
-        let path = file.0.clone();
-        let data_len = payload().len() as u64;
-        let result = prepare_compressed_image(
-            open_xz(&file),
-            VerifyMode::Full,
-            u64::MAX,
-            || false,
-            |progress: PreflightProgress| {
-                if progress.logical_produced == data_len
-                    && progress.compressed_consumed == compressed.len() as u64
-                {
-                    use std::os::unix::fs::FileExt as _;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    let same = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-                    same.write_all_at(&compressed[..16], 0).unwrap();
-                }
-            },
-        );
-        assert!(
-            matches!(result, Err(CompressedImageRejection::SourceChanged(_))),
-            "{result:?}"
-        );
-    }
 
     // The xz-specific Preflight rejections are displayed like every other
     // one: nothing was written, the target was not touched.

@@ -4928,9 +4928,10 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // gzip through the production preparation (`crate::prepare_compressed_image`:
-    // Quick refusal, Preflight bounded by the target's capacity,
-    // post-Preflight source check) and then the existing write / Verify path.
+    // gzip through the production preparation
+    // (`crate::orchestration::image::prepare_compressed_image`: Quick
+    // refusal, Preflight bounded by the target's capacity, post-Preflight
+    // source check) and then the existing write / Verify path.
     // ---------------------------------------------------------------------
 
     fn temp_gzip_image(tag: &str, payload: &[u8]) -> std::path::PathBuf {
@@ -4960,7 +4961,7 @@ mod tests {
         verify_mode: VerifyMode,
         target_capacity: u64,
     ) -> SelectedImage {
-        let source = crate::prepare_compressed_image(
+        let source = crate::orchestration::image::prepare_compressed_image(
             open_gzip_image(path),
             verify_mode,
             target_capacity,
@@ -5094,7 +5095,7 @@ mod tests {
     // Verify path as gzip. Nothing here is xz-specific except the file: the
     // Gate, `bind()`, the writer, the source checkpoints and Verify are the
     // generic ones, reached through the `CompressedImageSource` that
-    // `crate::prepare_compressed_image` returns.
+    // `crate::orchestration::image::prepare_compressed_image` returns.
     // ---------------------------------------------------------------------
 
     fn xz_bytes(payload: &[u8], check: liblzma::stream::Check) -> Vec<u8> {
@@ -5123,8 +5124,14 @@ mod tests {
             compressed.format(),
             crate::image_source::CompressionFormat::Xz
         );
-        crate::prepare_compressed_image(compressed, verify_mode, target_capacity, || false, |_| {})
-            .unwrap_or_else(|rejection| panic!("xz preparation failed: {rejection:?}"))
+        crate::orchestration::image::prepare_compressed_image(
+            compressed,
+            verify_mode,
+            target_capacity,
+            || false,
+            |_| {},
+        )
+        .unwrap_or_else(|rejection| panic!("xz preparation failed: {rejection:?}"))
     }
 
     // Counts `open_reader()` calls on the source it wraps, delegating
@@ -5527,7 +5534,7 @@ mod tests {
         verify_mode: VerifyMode,
         target_capacity: u64,
     ) -> SelectedImage {
-        let source = crate::prepare_compressed_image(
+        let source = crate::orchestration::image::prepare_compressed_image(
             open_gzip_image(path),
             verify_mode,
             target_capacity,
