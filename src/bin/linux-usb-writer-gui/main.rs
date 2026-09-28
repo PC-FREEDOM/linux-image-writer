@@ -6,14 +6,18 @@
 // (`inspect_image`) and its Verify rule (`ImageInfo::verify_availability`).
 // Nothing here decides Safety, identity, format or Verify support.
 //
-// Phase 3B-1b-1: choosing the image, the target and the Verify mode. The
-// write operation is not connected yet -- nothing in this program opens a
-// device or writes anything.
+// Choosing the image, the target and the Verify mode (Phase 3B-1b-1), and
+// running the write through the library's worker (`spawn_write_worker`,
+// Phase 3B-1b-2): the operation selects, prepares, asks for the final
+// confirmation, writes, syncs and verifies on its own thread; this program
+// shows its messages and returns the user's answers (`Approved` or
+// `Cancelled`, and cancellation). Nothing here opens a device.
 //
 //   linux-usb-writer-gui [image]   (an image given here is inspected at start)
 
 mod expansion;
 mod model;
+mod operation;
 mod text;
 mod window;
 

@@ -1,31 +1,42 @@
-// The main window: IMAGE, TARGET, WRITE OPTIONS, the warning and "Write",
-// top to bottom. State lives in `State` (presentation only); every section
-// is drawn from it. Work that can block -- image inspection and the device
-// list -- runs on GIO's blocking pool; only its result comes back to the GTK
-// thread.
+// The main window. Its main view is IMAGE, TARGET, WRITE OPTIONS, the
+// warning and "Write", top to bottom; "Write" switches to the operation
+// view, which follows the library's write worker until it ends. State lives
+// in `State` and `Operation` (presentation only); every section is drawn
+// from it. Work that can block -- image inspection and the device list --
+// runs on GIO's blocking pool, and the write runs on the worker's own
+// thread; only their results and messages come back to the GTK thread.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 use linux_usb_writer::report::ImageSourceError;
 use linux_usb_writer::{
-    CandidateListError, DeviceCandidate, ImageInfo, TargetRef, VerifyAvailability, VerifyMode,
-    inspect_image, list_candidates,
+    CandidateListError, ConfirmationDecision, DeviceCandidate, ImageInfo, OperationOutcome,
+    TargetRef, VerifyAvailability, VerifyMode, WorkerConfirmationRequest, WorkerMessage,
+    WriteOperationRequest, WriteWorker, inspect_image, list_candidates, spawn_write_worker,
 };
 
 use crate::expansion::{self, Panel};
 use crate::model::{
     self, CandidateLike, Eligibility, ImagePhase, SelectionOrigin, TargetChoice, VerifyState,
 };
+use crate::operation::{self, CancelAction, Ending, STEPS, Tracker};
 use crate::text;
 
 // How often the device list is read again (and whenever the window becomes
 // active).
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+// How often the worker's messages are read while an operation runs.
+const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+const MAIN_VIEW: &str = "main";
+const OPERATION_VIEW: &str = "operation";
 
 const VERIFY_MODES: [VerifyMode; 3] = [VerifyMode::Quick, VerifyMode::Full, VerifyMode::None];
 
@@ -36,8 +47,7 @@ enum ImageState {
     },
     Ready {
         name: String,
-        // What the write request will name (Phase 3B-1b-2); never shown.
-        #[allow(dead_code)]
+        // What the write request names; never shown.
         path: PathBuf,
         info: ImageInfo,
     },
@@ -93,8 +103,43 @@ struct State {
     open_panel: Option<Panel>,
 }
 
+// One write operation, from "Write" until the user returns to the main view.
+struct Operation {
+    // The library's worker; `None` once its outcome arrived (it is then
+    // joined) or it was lost.
+    worker: Option<WriteWorker>,
+    tracker: Tracker,
+    // The name of the file the request named.
+    image_name: String,
+    // Dialogs waiting for an answer; closed if the operation ends first.
+    dialogs: Vec<adw::AlertDialog>,
+    // How it ended, with the outcome for the technical details.
+    ended: Option<(Ending, String)>,
+}
+
+// The operation view's widgets, built once and updated from `Operation`.
+struct OperationUi {
+    title: gtk::Label,
+    spinner: gtk::Spinner,
+    status: gtk::Label,
+    note: gtk::Label,
+    image: gtk::Label,
+    target: gtk::Label,
+    steps: Vec<(adw::ActionRow, gtk::Image)>,
+    progress: gtk::ProgressBar,
+    amount: gtk::Label,
+    message: gtk::Label,
+    details: Vec<adw::ActionRow>,
+    cancel: gtk::Button,
+    back: gtk::Button,
+}
+
 struct Ui {
     window: adw::ApplicationWindow,
+    views: gtk::Stack,
+    toasts: adw::ToastOverlay,
+    op: OperationUi,
+    operation: RefCell<Option<Operation>>,
     image_box: gtk::Box,
     target_box: gtk::Box,
     verify_box: gtk::Box,
@@ -122,7 +167,11 @@ pub fn present(app: &adw::Application, image: Option<PathBuf>) {
         ui
     });
     ui.window.present();
-    if let Some(path) = image {
+    // While an operation runs, the main view is not shown or changed; an
+    // image opened then is not taken.
+    if let Some(path) = image
+        && ui.operation.borrow().is_none()
+    {
         inspect(&ui, path);
     }
 }
@@ -202,16 +251,30 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     toolbar.add_bottom_bar(&bottom);
     toolbar.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
 
+    let (op, op_page) = build_operation_view();
+    let views = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
+    views.add_named(&toolbar, Some(MAIN_VIEW));
+    views.add_named(&op_page, Some(OPERATION_VIEW));
+    views.set_visible_child_name(MAIN_VIEW);
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&views));
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Linux USB Writer")
         .default_width(600)
         .default_height(680)
-        .content(&toolbar)
+        .content(&toasts)
         .build();
 
     let ui = Rc::new(Ui {
         window,
+        views,
+        toasts,
+        op,
+        operation: RefCell::new(None),
         image_box,
         target_box,
         verify_box,
@@ -237,7 +300,31 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     {
         let ui_ref = ui.clone();
         ui.write_button
-            .connect_clicked(move |_| show_not_connected_yet(&ui_ref));
+            .connect_clicked(move |_| start_operation(&ui_ref));
+    }
+    {
+        let ui_ref = ui.clone();
+        ui.op
+            .cancel
+            .connect_clicked(move |_| cancel_pressed(&ui_ref));
+    }
+    {
+        let ui_ref = ui.clone();
+        ui.op
+            .back
+            .connect_clicked(move |_| back_to_main(&ui_ref, None));
+    }
+    {
+        // Closing the window would end the process and the write with it.
+        let ui_ref = ui.clone();
+        ui.window.connect_close_request(move |_| {
+            if operation_running(&ui_ref) {
+                show_cannot_close(&ui_ref);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
     }
     {
         let ui_ref = ui.clone();
@@ -1103,42 +1190,691 @@ fn render_write(ui: &Rc<Ui>) {
     }
 }
 
-// TEMPORARY (Phase 3B-1b-1): the write operation is not connected yet.
-// Pressing "Write" only says so; it opens no device and writes nothing.
-// Phase 3B-1b-2 replaces this with the worker, the final confirmation and
-// the progress view.
-fn show_not_connected_yet(ui: &Rc<Ui>) {
-    let body = {
+// ---- The operation ----
+//
+// "Write" hands the library a request built from the current choices (the
+// held `TargetRef` as the list gave it, the image path, the Verify mode) and
+// starts its worker. From then on the operation decides everything: this
+// view shows its messages, shows the final confirmation when -- and only
+// when -- the worker asks for it, and returns the user's answer and any
+// cancellation. The worker's typed outcome is what the view reports at the
+// end; the device list keeps refreshing but plays no part in it.
+
+fn operation_running(ui: &Ui) -> bool {
+    ui.operation
+        .borrow()
+        .as_ref()
+        .is_some_and(|operation| operation.ended.is_none())
+}
+
+fn start_operation(ui: &Rc<Ui>) {
+    if ui.operation.borrow().is_some() {
+        return;
+    }
+    let started = {
         let state = ui.state.borrow();
         if readiness(&state).is_err() {
             return;
         }
-        let image = match &state.image {
-            ImageState::Ready { name, .. } => name.clone(),
-            _ => return,
+        let (ImageState::Ready { name, path, .. }, Some(selection)) =
+            (&state.image, &state.choice.selection)
+        else {
+            return;
         };
-        let target = state
-            .selected
-            .and_then(|index| state.candidates.get(index))
-            .map(|candidate| {
-                let display = candidate.display();
-                format!(
-                    "{}（{} · {}）",
-                    text::device_name(&display.vendor, &display.model),
-                    display.device,
-                    text::size(display.size)
-                )
-            })
-            .unwrap_or_default();
-        format!(
-            "イメージ: {image}\n書き込み先: {target}\n検証: {}\n\n\
-             この開発段階では、書き込みの処理はまだ接続されていません。USB には何も書き込んでいません。",
-            text::verify_title(state.verify.mode)
+        // The request names the image by a UTF-8 path.
+        let Some(path) = path.to_str() else {
+            drop(state);
+            show_message(
+                ui,
+                "このイメージは書き込めません",
+                "ファイル名またはフォルダー名に、扱えない文字が含まれています。名前を変更してから選び直してください。",
+            );
+            return;
+        };
+        let request = WriteOperationRequest::new(selection.held.clone(), path, state.verify.mode);
+        (request, name.clone(), state.verify.mode)
+    };
+    let (request, image_name, verify_mode) = started;
+
+    let worker = match spawn_write_worker(request) {
+        Ok(worker) => worker,
+        Err(error) => {
+            show_message(
+                ui,
+                "書き込み処理を開始できませんでした",
+                &format!("USB ドライブには何も書き込んでいません。\n（{error}）"),
+            );
+            return;
+        }
+    };
+    *ui.operation.borrow_mut() = Some(Operation {
+        worker: Some(worker),
+        tracker: Tracker::new(verify_mode),
+        image_name,
+        dialogs: Vec::new(),
+        ended: None,
+    });
+    ui.views.set_visible_child_name(OPERATION_VIEW);
+    render_operation(ui);
+
+    let ui_ref = ui.clone();
+    glib::timeout_add_local(WORKER_POLL_INTERVAL, move || pump(&ui_ref));
+}
+
+// Reads every waiting message from the worker, then redraws once.
+fn pump(ui: &Rc<Ui>) -> glib::ControlFlow {
+    loop {
+        let received = {
+            let mut operation = ui.operation.borrow_mut();
+            let Some(worker) = operation
+                .as_mut()
+                .and_then(|operation| operation.worker.as_mut())
+            else {
+                return glib::ControlFlow::Break;
+            };
+            worker.try_recv()
+        };
+        match received {
+            Ok(WorkerMessage::Event(event)) => {
+                if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+                    operation.tracker.apply(&event);
+                }
+            }
+            Ok(WorkerMessage::ConfirmationRequested(request)) => {
+                if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+                    operation.tracker.confirmation_requested();
+                }
+                show_confirmation(ui, &request);
+            }
+            Ok(WorkerMessage::Finished(outcome)) => {
+                finish(ui, Some(*outcome));
+                return glib::ControlFlow::Break;
+            }
+            Err(TryRecvError::Empty) => break,
+            // The worker ended without an outcome.
+            Err(TryRecvError::Disconnected) => {
+                finish(ui, None);
+                return glib::ControlFlow::Break;
+            }
+        }
+    }
+    render_operation(ui);
+    glib::ControlFlow::Continue
+}
+
+// The worker sent its outcome (or was lost): nothing more comes from it.
+// It is joined off the GTK thread before the ending is shown.
+fn finish(ui: &Rc<Ui>, outcome: Option<OperationOutcome>) {
+    let (worker, dialogs) = {
+        let mut operation = ui.operation.borrow_mut();
+        let Some(operation) = operation.as_mut() else {
+            return;
+        };
+        operation.tracker.finished();
+        (
+            operation.worker.take(),
+            std::mem::take(&mut operation.dialogs),
         )
     };
-    let dialog = adw::AlertDialog::new(Some("書き込みは次の段階で接続します"), Some(&body));
+    for dialog in dialogs {
+        dialog.force_close();
+    }
+    render_operation(ui);
+
+    let ui_ref = ui.clone();
+    glib::spawn_future_local(async move {
+        let joined = match worker {
+            Some(worker) => gio::spawn_blocking(move || worker.join().is_ok())
+                .await
+                .unwrap_or(false),
+            None => true,
+        };
+        let (ending, mut detail) = match &outcome {
+            Some(outcome) => (
+                operation::ending(outcome),
+                operation::technical_detail(outcome),
+            ),
+            None => (
+                Ending::Lost,
+                "the worker ended without an outcome".to_string(),
+            ),
+        };
+        if !joined {
+            detail.push_str("\nthe worker thread panicked");
+        }
+        if let Some(operation) = ui_ref.operation.borrow_mut().as_mut() {
+            operation.ended = Some((ending, detail));
+        }
+        if ending.returns_to_main() {
+            back_to_main(
+                &ui_ref,
+                Some("書き込みを中止しました。USB ドライブには何も書き込んでいません。"),
+            );
+        } else {
+            render_operation(&ui_ref);
+        }
+    });
+}
+
+// Leaves the operation view. The choices made before "Write" are still
+// there; the device list's next refresh applies the usual selection rules.
+fn back_to_main(ui: &Rc<Ui>, toast: Option<&str>) {
+    if operation_running(ui) {
+        return;
+    }
+    *ui.operation.borrow_mut() = None;
+    ui.views.set_visible_child_name(MAIN_VIEW);
+    render_all(ui);
+    refresh_targets(ui);
+    if let Some(toast) = toast {
+        ui.toasts.add_toast(adw::Toast::new(toast));
+    }
+}
+
+// ---- Final confirmation ----
+
+// Shown only when the worker asks, with what its request says.
+fn show_confirmation(ui: &Rc<Ui>, request: &WorkerConfirmationRequest) {
+    let content = {
+        let operation = ui.operation.borrow();
+        let Some(operation) = operation.as_ref() else {
+            return;
+        };
+        text::confirmation(
+            request,
+            &operation.image_name,
+            operation.tracker.compression,
+            operation.tracker.compressed_size,
+        )
+    };
+
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .build();
+    let section = |heading: &str| {
+        gtk::Label::builder()
+            .label(heading)
+            .xalign(0.0)
+            .margin_top(8)
+            .css_classes(["caption-heading", "dim-label"])
+            .build()
+    };
+    let strong = |value: &str| {
+        gtk::Label::builder()
+            .label(value)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .css_classes(["heading"])
+            .build()
+    };
+    let plain = |value: &str| {
+        gtk::Label::builder()
+            .label(value)
+            .xalign(0.0)
+            .wrap(true)
+            .build()
+    };
+    body.append(&section("イメージ"));
+    body.append(&strong(&content.image_name));
+    for (label, value) in &content.image_lines {
+        body.append(&plain(&format!("{label}: {value}")));
+    }
+    let arrow = gtk::Image::from_icon_name("go-down-symbolic");
+    arrow.set_margin_top(4);
+    arrow.update_property(&[gtk::accessible::Property::Label("書き込み先へ")]);
+    body.append(&arrow);
+    body.append(&section("書き込み先"));
+    body.append(&strong(&content.target_name));
+    body.append(&plain(&content.target_line));
+    body.append(&section("検証"));
+    body.append(&plain(content.verify));
+    let warning = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(12)
+        .build();
+    warning.append(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+    warning.append(
+        &gtk::Label::builder()
+            .label(&content.warning)
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["warning"])
+            .build(),
+    );
+    body.append(&warning);
+
+    let dialog = adw::AlertDialog::new(Some("USB への書き込みを開始しますか？"), None);
+    dialog.set_extra_child(Some(&body));
+    dialog.add_response(operation::CONFIRM_RESPONSE_CANCEL, "キャンセル");
+    dialog.add_response(operation::CONFIRM_RESPONSE_WRITE, "USB に書き込む");
+    dialog.set_response_appearance(
+        operation::CONFIRM_RESPONSE_WRITE,
+        adw::ResponseAppearance::Destructive,
+    );
+    // Enter and Escape never approve.
+    dialog.set_default_response(Some(operation::CONFIRM_RESPONSE_CANCEL));
+    dialog.set_close_response(operation::CONFIRM_RESPONSE_CANCEL);
+    let ui_ref = ui.clone();
+    dialog.connect_response(None, move |dialog, response| {
+        forget_dialog(&ui_ref, dialog);
+        answer(&ui_ref, operation::decision_for(response));
+    });
+    if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+        operation.dialogs.push(dialog.clone());
+    }
+    dialog.present(Some(&ui.window));
+}
+
+// Delivers the user's answer to the pending confirmation. A decision the
+// worker no longer waits for (it ended, or was cancelled) is dropped.
+fn answer(ui: &Rc<Ui>, decision: ConfirmationDecision) {
+    let approved = matches!(decision, ConfirmationDecision::Approved);
+    {
+        let mut operation = ui.operation.borrow_mut();
+        let Some(operation) = operation.as_mut() else {
+            return;
+        };
+        let Some(worker) = operation.worker.as_mut() else {
+            return;
+        };
+        if worker.submit_confirmation(decision).is_ok() {
+            operation.tracker.answered(approved);
+        }
+    }
+    render_operation(ui);
+}
+
+fn forget_dialog(ui: &Ui, dialog: &adw::AlertDialog) {
+    if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+        operation.dialogs.retain(|shown| shown != dialog);
+    }
+}
+
+// ---- Cancel ----
+
+fn cancel_pressed(ui: &Rc<Ui>) {
+    let action = match ui.operation.borrow().as_ref() {
+        Some(operation) => operation.tracker.cancel_action(),
+        None => return,
+    };
+    match action {
+        CancelAction::RequestNow => request_cancel(ui),
+        CancelAction::Decline => answer(ui, ConfirmationDecision::Cancelled),
+        CancelAction::AskFirst => ask_to_stop_writing(ui),
+        CancelAction::Unavailable => {}
+    }
+}
+
+// Asks the operation to stop at its next cancel point. What it actually
+// did is its outcome, shown when it arrives.
+fn request_cancel(ui: &Rc<Ui>) {
+    {
+        let mut operation = ui.operation.borrow_mut();
+        let Some(operation) = operation.as_mut() else {
+            return;
+        };
+        if operation.tracker.cancel_requested {
+            return;
+        }
+        let Some(worker) = operation.worker.as_ref() else {
+            return;
+        };
+        worker.request_cancel();
+        operation.tracker.cancel_requested = true;
+    }
+    render_operation(ui);
+}
+
+// Once the write may have started, stopping it is confirmed once.
+fn ask_to_stop_writing(ui: &Rc<Ui>) {
+    let dialog = adw::AlertDialog::new(
+        Some("書き込みを中止しますか？"),
+        Some("中止すると、USB ドライブには不完全なイメージが残る可能性があります。"),
+    );
+    dialog.add_response("continue", "書き込みを続ける");
+    dialog.add_response("stop", "中止する");
+    dialog.set_response_appearance("stop", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("continue"));
+    dialog.set_close_response("continue");
+    let ui_ref = ui.clone();
+    dialog.connect_response(None, move |dialog, response| {
+        forget_dialog(&ui_ref, dialog);
+        if response == "stop" {
+            request_cancel(&ui_ref);
+        }
+    });
+    if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+        operation.dialogs.push(dialog.clone());
+    }
+    dialog.present(Some(&ui.window));
+}
+
+// Shown once at a time, and closed when the operation ends.
+fn show_cannot_close(ui: &Rc<Ui>) {
+    const HEADING: &str = "書き込み処理の実行中です";
+    let shown = ui.operation.borrow().as_ref().is_some_and(|operation| {
+        operation
+            .dialogs
+            .iter()
+            .any(|dialog| dialog.heading().as_deref() == Some(HEADING))
+    });
+    if shown {
+        return;
+    }
+    let dialog = show_message(
+        ui,
+        HEADING,
+        "処理が終わるまで、ウィンドウは閉じられません。中止する場合は「キャンセル」を押してください。",
+    );
+    let ui_ref = ui.clone();
+    dialog.connect_response(None, move |dialog, _| forget_dialog(&ui_ref, dialog));
+    if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+        operation.dialogs.push(dialog);
+    }
+}
+
+fn show_message(ui: &Rc<Ui>, heading: &str, body: &str) -> adw::AlertDialog {
+    let dialog = adw::AlertDialog::new(Some(heading), Some(body));
     dialog.add_response("close", "閉じる");
     dialog.set_default_response(Some("close"));
     dialog.set_close_response("close");
     dialog.present(Some(&ui.window));
+    dialog
+}
+
+// ---- The operation view ----
+
+const DETAIL_NAMES: [&str; 13] = [
+    "イメージ",
+    "圧縮 (Compression)",
+    "書き込みサイズ",
+    "書き込み先",
+    "デバイス",
+    "UDisks2 オブジェクト",
+    "major:minor",
+    "diskseq",
+    "検証",
+    "現在の段階",
+    "書き込み済み",
+    "検証済み",
+    "結果 (Outcome)",
+];
+
+fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
+    let centered = |classes: &[&str]| {
+        gtk::Label::builder()
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .css_classes(classes.to_vec())
+            .build()
+    };
+    let title = centered(&["title-2"]);
+    let spinner = gtk::Spinner::builder().spinning(true).build();
+    spinner.update_property(&[gtk::accessible::Property::Label("処理中")]);
+    let status = centered(&["heading"]);
+    let status_line = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .build();
+    status_line.append(&spinner);
+    status_line.append(&status);
+    let note = centered(&["dim-label"]);
+
+    let image = centered(&["heading"]);
+    image.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    let arrow = gtk::Image::from_icon_name("go-down-symbolic");
+    arrow.update_property(&[gtk::accessible::Property::Label("書き込み先へ")]);
+    let target = centered(&[]);
+    let flow = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .build();
+    flow.append(&image);
+    flow.append(&arrow);
+    flow.append(&target);
+
+    let step_list = list();
+    let steps = STEPS
+        .iter()
+        .map(|step| {
+            let row = row(text::step_name(*step), "");
+            let icon = gtk::Image::new();
+            row.add_prefix(&icon);
+            step_list.append(&row);
+            (row, icon)
+        })
+        .collect();
+
+    let progress = gtk::ProgressBar::builder().show_text(true).build();
+    let amount = centered(&["dim-label", "numeric"]);
+    let message = centered(&[]);
+
+    let details_list = list();
+    let expander = adw::ExpanderRow::builder().build();
+    expander.set_use_markup(false);
+    expander.set_title("技術情報");
+    let details = DETAIL_NAMES
+        .iter()
+        .map(|name| {
+            let row = detail_row(name, "");
+            expander.add_row(&row);
+            row
+        })
+        .collect();
+    details_list.append(&expander);
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(18)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    for widget in [
+        title.upcast_ref::<gtk::Widget>(),
+        status_line.upcast_ref(),
+        note.upcast_ref(),
+        flow.upcast_ref(),
+        step_list.upcast_ref(),
+        progress.upcast_ref(),
+        amount.upcast_ref(),
+        message.upcast_ref(),
+        details_list.upcast_ref(),
+    ] {
+        content.append(widget);
+    }
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(
+            &adw::Clamp::builder()
+                .maximum_size(560)
+                .child(&content)
+                .build(),
+        )
+        .build();
+
+    let cancel = gtk::Button::builder()
+        .label("キャンセル")
+        .halign(gtk::Align::Center)
+        .css_classes(["pill"])
+        .build();
+    let back = gtk::Button::builder()
+        .label("メイン画面へ戻る")
+        .halign(gtk::Align::Center)
+        .css_classes(["pill", "suggested-action"])
+        .visible(false)
+        .build();
+    let bottom = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+    bottom.append(&cancel);
+    bottom.append(&back);
+
+    let page = adw::ToolbarView::new();
+    page.add_top_bar(&adw::HeaderBar::new());
+    page.set_content(Some(&scroller));
+    page.add_bottom_bar(&bottom);
+    page.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
+
+    (
+        OperationUi {
+            title,
+            spinner,
+            status,
+            note,
+            image,
+            target,
+            steps,
+            progress,
+            amount,
+            message,
+            details,
+            cancel,
+            back,
+        },
+        page,
+    )
+}
+
+fn render_operation(ui: &Ui) {
+    let operation = ui.operation.borrow();
+    let Some(operation) = operation.as_ref() else {
+        return;
+    };
+    let op = &ui.op;
+    let tracker = &operation.tracker;
+
+    op.image.set_text(&operation.image_name);
+    op.target.set_text(&match &tracker.target {
+        Some(target) => format!(
+            "{} · {}",
+            text::device_name(&target.vendor, &target.model),
+            target.device
+        ),
+        None => "書き込み先を確認しています…".to_string(),
+    });
+
+    let marks = match &operation.ended {
+        Some((ending, _)) => ending.marks(tracker.verify_mode),
+        None => tracker.marks(),
+    };
+    for ((row, icon), mark) in op.steps.iter().zip(marks) {
+        row.set_subtitle(text::mark_label(mark));
+        icon.set_icon_name(Some(text::mark_icon(mark)));
+    }
+
+    match &operation.ended {
+        None => {
+            let (status, note) = text::activity(tracker);
+            op.title.set_text(text::headline(tracker.step()));
+            op.status.set_text(status);
+            op.status.set_visible(!status.is_empty());
+            op.spinner.set_visible(!status.is_empty());
+            op.note.set_text(note);
+            op.note.set_visible(!note.is_empty());
+            match tracker.transfer() {
+                Some(transfer) => {
+                    let percent = format!("{}%", transfer.percent());
+                    op.progress.set_fraction(transfer.fraction());
+                    op.progress.set_text(Some(&percent));
+                    op.progress
+                        .update_property(&[gtk::accessible::Property::Label(&format!(
+                            "{status} {percent}"
+                        ))]);
+                    op.amount
+                        .set_text(&text::transfer(transfer.done, transfer.total));
+                    op.progress.set_visible(true);
+                    op.amount.set_visible(true);
+                }
+                None => {
+                    op.progress.set_visible(false);
+                    op.amount.set_visible(false);
+                }
+            }
+            op.message.set_visible(false);
+            let action = tracker.cancel_action();
+            op.cancel.set_visible(true);
+            op.cancel.set_sensitive(action != CancelAction::Unavailable);
+            op.back.set_visible(false);
+        }
+        Some((ending, _)) => {
+            op.title.set_text(text::ending_title(*ending));
+            op.status.set_visible(false);
+            op.spinner.set_visible(false);
+            op.note.set_visible(false);
+            op.progress.set_visible(false);
+            op.amount.set_visible(false);
+            op.message.set_text(&text::ending_message(*ending));
+            op.message.set_visible(true);
+            op.cancel.set_visible(false);
+            op.back.set_visible(true);
+        }
+    }
+    // Before the outcome is joined and shown, neither button acts.
+    if operation.ended.is_none() && tracker.activity == operation::Activity::Finished {
+        op.cancel.set_sensitive(false);
+    }
+
+    let pending = "確認中".to_string();
+    let values = [
+        operation.image_name.clone(),
+        match tracker.compression {
+            Some(format) => text::compression_name(Some(format)).to_string(),
+            None if tracker.image_size.is_some() => text::compression_name(None).to_string(),
+            None => pending.clone(),
+        },
+        tracker
+            .image_size
+            .map(text::exact_bytes)
+            .unwrap_or_else(|| pending.clone()),
+        tracker
+            .target
+            .as_ref()
+            .map(|target| text::device_name(&target.vendor, &target.model))
+            .unwrap_or_else(|| pending.clone()),
+        tracker
+            .target
+            .as_ref()
+            .map(|target| target.device.clone())
+            .unwrap_or_else(|| pending.clone()),
+        tracker
+            .block_path
+            .clone()
+            .unwrap_or_else(|| pending.clone()),
+        tracker
+            .major_minor
+            .map(|(major, minor)| format!("{major}:{minor}"))
+            .unwrap_or_else(|| "未取得".to_string()),
+        tracker
+            .diskseq
+            .map(|seq| seq.to_string())
+            .unwrap_or_else(|| "不明".to_string()),
+        text::verify_title(tracker.verify_mode).to_string(),
+        format!("{:?}", tracker.activity),
+        tracker
+            .written
+            .map(|written| text::exact_bytes(written.done))
+            .unwrap_or_else(|| "0 バイト".to_string()),
+        tracker
+            .verified
+            .map(|verified| text::exact_bytes(verified.done))
+            .unwrap_or_else(|| "0 バイト".to_string()),
+        operation
+            .ended
+            .as_ref()
+            .map(|(_, detail)| detail.clone())
+            .unwrap_or_else(|| "実行中".to_string()),
+    ];
+    for (row, value) in op.details.iter().zip(values) {
+        row.set_subtitle(&value);
+    }
 }
