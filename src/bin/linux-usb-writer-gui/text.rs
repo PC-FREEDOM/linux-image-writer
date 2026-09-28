@@ -184,20 +184,40 @@ pub fn verify_title(mode: VerifyMode) -> &'static str {
 
 pub fn verify_description(mode: VerifyMode) -> &'static str {
     match mode {
-        VerifyMode::Quick => "書き込み後、一部を読み戻して確認します",
+        VerifyMode::Quick => "書き込み後、一部を読み戻して確認します。",
         VerifyMode::Full => {
-            "書き込んだデータをすべて読み戻して確認します。クイック検証より時間がかかります"
+            "書き込んだデータをすべて読み戻して確認します。\nクイック検証より時間がかかります。"
         }
-        VerifyMode::None => "書き込み後の読み戻し確認を行いません",
+        VerifyMode::None => "書き込み後の読み戻し確認は行われません。",
     }
 }
 
+// The one explanation shown under the Verify choices: the selected mode's,
+// once an image is known.
+pub fn verify_help(image_ready: bool, selected: VerifyMode) -> Option<&'static str> {
+    image_ready.then(|| verify_description(selected))
+}
+
+// Next to a mode the image does not allow.
+pub fn verify_unavailable_short(reason: VerifyUnavailableReason) -> &'static str {
+    match reason {
+        VerifyUnavailableReason::NeedsRandomAccess => "このイメージでは利用できません",
+    }
+}
+
+// Why (tooltip and accessible description of that mode).
 pub fn verify_unavailable(reason: VerifyUnavailableReason) -> &'static str {
     match reason {
         VerifyUnavailableReason::NeedsRandomAccess => {
-            "このイメージでは利用できません（読み戻しに必要な任意位置の読み取りができない形式です）"
+            "この形式のイメージは任意の位置から読み取れないため、一部を読み戻すクイック検証は利用できません"
         }
     }
+}
+
+// What "available" means (technical details): a format check, not a
+// promise that Verify will succeed on the device.
+pub fn verify_availability_note() -> &'static str {
+    "イメージの形式による判定です。検証そのものは、実行時にデバイスの状態によって失敗することがあります"
 }
 
 pub fn verify_unavailable_name(reason: VerifyUnavailableReason) -> &'static str {
@@ -271,6 +291,32 @@ mod tests {
             }
         }
         assert!(image_error(&cases[4]).contains("ZSTD"));
+    }
+
+    #[test]
+    fn only_the_selected_verify_mode_is_explained() {
+        assert_eq!(verify_help(false, VerifyMode::Quick), None);
+        assert_eq!(
+            verify_help(true, VerifyMode::Quick),
+            Some("書き込み後、一部を読み戻して確認します。")
+        );
+        assert_eq!(
+            verify_help(true, VerifyMode::Full),
+            Some(
+                "書き込んだデータをすべて読み戻して確認します。\nクイック検証より時間がかかります。"
+            )
+        );
+        assert_eq!(
+            verify_help(true, VerifyMode::None),
+            Some("書き込み後の読み戻し確認は行われません。")
+        );
+        // Each mode has its own explanation.
+        let modes = [VerifyMode::Quick, VerifyMode::Full, VerifyMode::None];
+        for a in modes {
+            for b in modes {
+                assert_eq!(a == b, verify_help(true, a) == verify_help(true, b));
+            }
+        }
     }
 
     #[test]

@@ -131,9 +131,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(24)
-        .margin_top(18)
-        .margin_bottom(18)
+        .spacing(18)
+        .margin_top(12)
+        .margin_bottom(12)
         .margin_start(12)
         .margin_end(12)
         .build();
@@ -165,22 +165,27 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             .wrap(true)
             .build(),
     );
+    // Shown only while "Write" is disabled: what is still needed.
     let write_status = gtk::Label::builder()
         .wrap(true)
         .justify(gtk::Justification::Center)
         .css_classes(["dim-label"])
+        .visible(false)
         .build();
+    // The standard primary style: its disabled look is plainly "not yet",
+    // never an error. The final confirmation (next phase) carries the
+    // destructive style.
     let write_button = gtk::Button::builder()
         .label("USB に書き込む")
         .halign(gtk::Align::Center)
         .sensitive(false)
-        .css_classes(["pill", "destructive-action"])
+        .css_classes(["pill", "suggested-action"])
         .build();
     let bottom = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
+        .spacing(6)
+        .margin_top(8)
+        .margin_bottom(8)
         .margin_start(12)
         .margin_end(12)
         .build();
@@ -197,8 +202,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Linux USB Writer")
-        .default_width(640)
-        .default_height(760)
+        .default_width(600)
+        .default_height(680)
         .content(&toolbar)
         .build();
 
@@ -255,7 +260,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 fn section_box() -> gtk::Box {
     gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
+        .spacing(8)
         .build()
 }
 
@@ -441,7 +446,6 @@ fn render_image(ui: &Rc<Ui>) {
             button.add_css_class("suggested-action");
             row.add_suffix(&button);
             rows.append(&row);
-            ui.image_box.append(&rows);
         }
         ImageState::Inspecting { name } => {
             let row = row("イメージを確認しています…", name);
@@ -450,23 +454,19 @@ fn render_image(ui: &Rc<Ui>) {
             row.add_prefix(&spinner);
             row.add_suffix(&choose("別のイメージを選択"));
             rows.append(&row);
-            ui.image_box.append(&rows);
         }
         ImageState::Ready { name, info, .. } => {
-            let summary = format!(
-                "書き込みできます · {} · {}",
+            // One row: the image, its summary and "Change"; the technical
+            // details open inside it.
+            let mut summary = format!(
+                "{} · {}",
                 text::size(info.file_size()),
                 text::image_kind(info.compression())
             );
-            let row = status_row("emblem-ok-symbolic", name, &summary);
-            row.add_suffix(&choose("変更"));
-            rows.append(&row);
             if info.compression().is_some() {
-                rows.append(&status_row(
-                    "dialog-information-symbolic",
-                    "展開しながら USB に書き込みます",
-                    "書き込みサイズは準備時に確認します",
-                ));
+                summary.push_str(
+                    "\n展開しながら USB に書き込みます（書き込みサイズは準備時に確認します）",
+                );
             }
             let verify = |mode| match info.verify_availability(mode) {
                 VerifyAvailability::Available => "Available".to_string(),
@@ -474,8 +474,8 @@ fn render_image(ui: &Rc<Ui>) {
                     format!("Unavailable ({})", text::verify_unavailable_name(reason))
                 }
             };
-            rows.append(&details(
-                "技術情報",
+            let expander = details(
+                name,
                 &[
                     (
                         "圧縮 (Compression)",
@@ -492,27 +492,39 @@ fn render_image(ui: &Rc<Ui>) {
                     ("Quick Verify", verify(VerifyMode::Quick)),
                     ("Full Verify", verify(VerifyMode::Full)),
                     ("Verify なし", verify(VerifyMode::None)),
+                    (
+                        "Verify の可否について",
+                        text::verify_availability_note().to_string(),
+                    ),
                     ("アーキテクチャ / ブート方式", "Not detected".to_string()),
                 ],
-            ));
-            ui.image_box.append(&rows);
+            );
+            expander.set_subtitle(&summary);
+            expander.set_subtitle_lines(0);
+            let ok = gtk::Image::from_icon_name("emblem-ok-symbolic");
+            ok.set_tooltip_text(Some("書き込みできます"));
+            ok.update_property(&[gtk::accessible::Property::Label("書き込みできます")]);
+            expander.add_prefix(&ok);
+            expander.add_suffix(&choose("変更"));
+            expander.set_tooltip_text(Some("開くと技術情報を表示します"));
+            rows.append(&expander);
         }
         ImageState::Failed {
             name,
             message,
             detail,
         } => {
-            let row = status_row(
-                "dialog-error-symbolic",
+            let expander = details(
                 "このイメージは書き込めません",
-                &format!("{name} — {message}"),
+                &[("エラー", detail.clone())],
             );
-            row.add_suffix(&choose("別のイメージを選択"));
-            rows.append(&row);
-            rows.append(&details("技術情報", &[("エラー", detail.clone())]));
-            ui.image_box.append(&rows);
+            expander.set_subtitle(&format!("{name} — {message}"));
+            expander.add_prefix(&gtk::Image::from_icon_name("dialog-error-symbolic"));
+            expander.add_suffix(&choose("別のイメージを選択"));
+            rows.append(&expander);
         }
     }
+    ui.image_box.append(&rows);
 }
 
 // ---- TARGET ----
@@ -764,6 +776,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                 "容量の大きい USB ドライブを接続してください",
             ));
         }
+        append_protected(ui, &rows, &view, protected_expanded);
         ui.target_box.append(&rows);
     } else {
         if !view.image_ready {
@@ -775,11 +788,12 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
         }
         let rows = list();
         for entry in &view.available {
-            let row = row(&entry.title, &entry.subtitle);
-            if view.image_ready {
+            let selected = view.selected == Some(entry.index);
+            // The selected entry carries its details inside its own row.
+            let prefix: gtk::Widget = if view.image_ready {
                 let check = gtk::CheckButton::new();
                 check.set_group(Some(&ui.target_group));
-                check.set_active(view.selected == Some(entry.index));
+                check.set_active(selected);
                 check.update_property(&[gtk::accessible::Property::Label(&format!(
                     "{} {}",
                     entry.title, entry.subtitle
@@ -791,45 +805,46 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                         select_target(&ui_ref, index);
                     }
                 });
-                row.add_prefix(&check);
-                row.set_activatable_widget(Some(&check));
-                if view.selected == Some(entry.index) && view.auto {
-                    row.add_suffix(&tag("自動的に選択しました"));
-                }
+                check.upcast()
             } else {
-                // Before an image is ready nothing can be chosen; a choice kept
-                // from an earlier image (while another one is inspected or was
-                // refused) is still shown as chosen.
-                row.add_prefix(&gtk::Image::from_icon_name(
-                    "drive-removable-media-symbolic",
-                ));
-                row.add_suffix(&tag(if view.selected == Some(entry.index) {
-                    "選択中"
-                } else {
-                    "検出済み"
-                }));
+                gtk::Image::from_icon_name("drive-removable-media-symbolic").upcast()
+            };
+            // Before an image is ready nothing can be chosen; a choice kept
+            // from an earlier image (while another one is inspected or was
+            // refused) is still shown as chosen.
+            let note = match (view.image_ready, selected) {
+                (true, true) if view.auto => Some("自動的に選択しました"),
+                (true, _) => None,
+                (false, true) => Some("選択中"),
+                (false, false) => Some("検出済み"),
+            };
+            if selected && !view.details.is_empty() {
+                let expander = details(&entry.title, &view.details);
+                expander.set_subtitle(&entry.subtitle);
+                expander.add_prefix(&prefix);
+                if let Some(note) = note {
+                    expander.add_suffix(&tag(note));
+                }
+                expander.set_tooltip_text(Some("開くとデバイスの詳細を表示します"));
+                expander.set_expanded(details_expanded);
+                let ui_ref = ui.clone();
+                expander.connect_expanded_notify(move |expander| {
+                    ui_ref.state.borrow_mut().details_expanded = expander.is_expanded();
+                });
+                rows.append(&expander);
+            } else {
+                let row = row(&entry.title, &entry.subtitle);
+                row.add_prefix(&prefix);
+                if let Some(check) = prefix.downcast_ref::<gtk::CheckButton>() {
+                    row.set_activatable_widget(Some(check));
+                }
+                if let Some(note) = note {
+                    row.add_suffix(&tag(note));
+                }
+                rows.append(&row);
             }
-            rows.append(&row);
         }
-        ui.target_box.append(&rows);
-    }
-
-    if !view.details.is_empty() {
-        let rows = list();
-        let expander = details(
-            "選択中のデバイスの詳細",
-            &view
-                .details
-                .iter()
-                .map(|(name, value)| (*name, value.clone()))
-                .collect::<Vec<_>>(),
-        );
-        expander.set_expanded(details_expanded);
-        let ui_ref = ui.clone();
-        expander.connect_expanded_notify(move |expander| {
-            ui_ref.state.borrow_mut().details_expanded = expander.is_expanded();
-        });
-        rows.append(&expander);
+        append_protected(ui, &rows, &view, protected_expanded);
         ui.target_box.append(&rows);
     }
 
@@ -847,29 +862,48 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
         ui.target_box.append(&rows);
     }
 
-    if !view.protected.is_empty() {
-        let rows = list();
-        let expander = adw::ExpanderRow::builder().build();
-        expander.set_use_markup(false);
-        expander.set_title(&format!(
-            "保護されているデバイス（{}）",
-            view.protected.len()
-        ));
-        expander.set_subtitle("安全のため、書き込み先には選べません");
-        expander.add_prefix(&gtk::Image::from_icon_name("changes-prevent-symbolic"));
-        for entry in &view.protected {
-            expander.add_row(&row(&entry.title, &entry.subtitle));
-        }
-        expander.set_expanded(protected_expanded);
-        let ui_ref = ui.clone();
-        expander.connect_expanded_notify(move |expander| {
-            ui_ref.state.borrow_mut().protected_expanded = expander.is_expanded();
-        });
-        rows.append(&expander);
-        ui.target_box.append(&rows);
-    }
-
     ui.state.borrow_mut().target_view = Some(view);
+}
+
+// The protected devices, collapsed to one line at the end of the target
+// list: never hidden, never selectable.
+fn append_protected(ui: &Rc<Ui>, rows: &gtk::ListBox, view: &TargetView, expanded: bool) {
+    if view.protected.is_empty() {
+        return;
+    }
+    let expander = adw::ExpanderRow::builder().build();
+    expander.set_use_markup(false);
+    expander.set_title(&format!(
+        "保護されているデバイス（{}）",
+        view.protected.len()
+    ));
+    let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");
+    lock.update_property(&[gtk::accessible::Property::Label("保護")]);
+    expander.add_prefix(&lock);
+    expander.set_tooltip_text(Some("安全のため、書き込み先には選べません"));
+    expander.add_row(&caption_row("安全のため、書き込み先には選べません"));
+    for entry in &view.protected {
+        expander.add_row(&row(&entry.title, &entry.subtitle));
+    }
+    expander.set_expanded(expanded);
+    let ui_ref = ui.clone();
+    expander.connect_expanded_notify(move |expander| {
+        ui_ref.state.borrow_mut().protected_expanded = expander.is_expanded();
+    });
+    rows.append(&expander);
+}
+
+fn caption_row(text: &str) -> gtk::ListBoxRow {
+    let label = caption(text);
+    label.set_margin_top(8);
+    label.set_margin_bottom(8);
+    label.set_margin_start(12);
+    label.set_margin_end(12);
+    gtk::ListBoxRow::builder()
+        .child(&label)
+        .activatable(false)
+        .selectable(false)
+        .build()
 }
 
 fn tag(text: &str) -> gtk::Label {
@@ -886,53 +920,86 @@ fn render_verify(ui: &Rc<Ui>) {
     let state = ui.state.borrow();
     clear(&ui.verify_box);
     let info = state.image.info();
+    ui.verify_box.append(
+        &gtk::Label::builder()
+            .label("検証")
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build(),
+    );
     if info.is_none() {
         ui.verify_box
             .append(&caption("イメージを選択すると検証方法を設定できます"));
     }
 
-    let rows = list();
+    // All three choices are always shown; only the selected one is
+    // explained below them.
+    let choices = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .build();
     for mode in VERIFY_MODES {
         let availability = info.map(|info| info.verify_availability(mode));
-        let mut subtitle = text::verify_description(mode).to_string();
-        if let Some(VerifyAvailability::Unavailable(reason)) = availability {
-            subtitle = format!("{subtitle}\n{}", text::verify_unavailable(reason));
+        let label = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        label.append(&gtk::Label::new(Some(text::verify_title(mode))));
+        let mut accessible = text::verify_title(mode).to_string();
+        if mode == VerifyMode::Quick {
+            label.append(
+                &gtk::Label::builder()
+                    .label("おすすめ")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["caption", "accent"])
+                    .build(),
+            );
+            accessible.push_str("（おすすめ）");
         }
-        let row = row(text::verify_title(mode), &subtitle);
-        let check = gtk::CheckButton::new();
+        let check = gtk::CheckButton::builder().child(&label).build();
+        if let Some(VerifyAvailability::Unavailable(reason)) = availability {
+            label.append(&tag(text::verify_unavailable_short(reason)));
+            check.set_tooltip_text(Some(text::verify_unavailable(reason)));
+            accessible = format!("{accessible}。{}", text::verify_unavailable(reason));
+        }
+        check.update_property(&[gtk::accessible::Property::Label(&accessible)]);
         check.set_group(Some(&ui.verify_group));
         check.set_active(info.is_some() && state.verify.mode == mode);
-        check.update_property(&[gtk::accessible::Property::Label(text::verify_title(mode))]);
-        let usable = availability == Some(VerifyAvailability::Available);
-        row.set_sensitive(usable);
+        check.set_sensitive(availability == Some(VerifyAvailability::Available));
         let ui_ref = ui.clone();
         check.connect_toggled(move |check| {
             if check.is_active() {
                 choose_verify(&ui_ref, mode);
             }
         });
-        row.add_prefix(&check);
-        row.set_activatable_widget(Some(&check));
-        if mode == VerifyMode::Quick {
-            row.add_suffix(&tag("おすすめ"));
-        }
-        rows.append(&row);
+        choices.append(&check);
     }
-    ui.verify_box.append(&rows);
+    ui.verify_box.append(&choices);
 
-    if let Some(notice) = state.verify.notice {
-        let rows = list();
-        rows.append(&status_row(
-            "dialog-information-symbolic",
-            &text::verify_notice(notice),
-            "",
-        ));
-        ui.verify_box.append(&rows);
+    if let Some(help) = text::verify_help(info.is_some(), state.verify.mode) {
+        ui.verify_box.append(
+            &gtk::Label::builder()
+                .label(help)
+                .wrap(true)
+                .xalign(0.0)
+                .css_classes(["dim-label"])
+                .build(),
+        );
     }
-    if info.is_some() {
-        ui.verify_box.append(&caption(
-            "利用できるかどうかはイメージの形式による判定です。検証そのものは、実行時にデバイスの状態によって失敗することがあります。",
-        ));
+    if let Some(notice) = state.verify.notice {
+        let line = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        line.append(&gtk::Image::from_icon_name("dialog-information-symbolic"));
+        line.append(
+            &gtk::Label::builder()
+                .label(text::verify_notice(notice))
+                .wrap(true)
+                .xalign(0.0)
+                .build(),
+        );
+        ui.verify_box.append(&line);
     }
 }
 
@@ -976,13 +1043,16 @@ fn readiness(state: &State) -> Result<(), model::WriteBlocker> {
 fn render_write(ui: &Rc<Ui>) {
     let state = ui.state.borrow();
     match readiness(&state) {
+        // An enabled button says "ready" by itself; only what is still
+        // missing is written out.
         Ok(()) => {
             ui.write_button.set_sensitive(true);
-            ui.write_status.set_text("準備ができました");
+            ui.write_status.set_visible(false);
         }
         Err(blocker) => {
             ui.write_button.set_sensitive(false);
             ui.write_status.set_text(&text::write_blocker(blocker));
+            ui.write_status.set_visible(true);
         }
     }
 }
