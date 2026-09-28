@@ -15,9 +15,22 @@ edition = "2024"
 path = "src/lib.rs"
 test = false
 
+# The Production GUI (GTK4 + libadwaita). A separate binary that uses only
+# the library's public API, like any outside consumer; built only with
+# `--features gui`, so the CLI and the library never need GTK.
+[[bin]]
+name = "linux-usb-writer-gui"
+path = "src/bin/linux-usb-writer-gui/main.rs"
+required-features = ["gui"]
+
+[features]
+gui = ["dep:adw", "dep:gtk"]
+
 [dependencies]
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_5"], optional = true }
 ctrlc = "3.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend", "runtime_detection"] }
+gtk = { package = "gtk4", version = "0.11.5", features = ["v4_12"], optional = true }
 libc = "0.2.189"
 liblzma = { version = "0.4.8", features = ["static"] }
 linux-raw-sys = { version = "0.12.1", default-features = false, features = ["ioctl"] }
