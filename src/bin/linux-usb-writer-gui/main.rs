@@ -12,6 +12,7 @@
 //
 //   linux-usb-writer-gui [image]   (an image given here is inspected at start)
 
+mod expansion;
 mod model;
 mod text;
 mod window;

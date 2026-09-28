@@ -17,6 +17,7 @@ use linux_usb_writer::{
     inspect_image, list_candidates,
 };
 
+use crate::expansion::{self, Panel};
 use crate::model::{
     self, CandidateLike, Eligibility, ImagePhase, SelectionOrigin, TargetChoice, VerifyState,
 };
@@ -88,8 +89,8 @@ struct State {
     verify: VerifyState,
     // What the target section shows now, to redraw only on a change.
     target_view: Option<TargetView>,
-    protected_expanded: bool,
-    details_expanded: bool,
+    // The one details panel shown expanded, if any.
+    open_panel: Option<Panel>,
 }
 
 struct Ui {
@@ -104,6 +105,8 @@ struct Ui {
     // many, never unchecked by clicking it) even when a list has only one.
     target_group: gtk::CheckButton,
     verify_group: gtk::CheckButton,
+    // The expander rows currently shown for each details panel.
+    panels: RefCell<Vec<(Panel, adw::ExpanderRow)>>,
     state: RefCell<State>,
 }
 
@@ -216,6 +219,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         write_status,
         target_group: gtk::CheckButton::new(),
         verify_group: gtk::CheckButton::new(),
+        panels: RefCell::new(Vec::new()),
         state: RefCell::new(State {
             image: ImageState::Missing,
             image_generation: 0,
@@ -226,8 +230,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             refreshing: false,
             verify: VerifyState::initial(),
             target_view: None,
-            protected_expanded: false,
-            details_expanded: false,
+            open_panel: None,
         }),
     });
 
@@ -315,6 +318,54 @@ fn details(title: &str, rows: &[(&str, String)]) -> adw::ExpanderRow {
         expander.add_row(&detail_row(name, value));
     }
     expander
+}
+
+// Shows `expander` as `panel`: expanded only if it is the open panel, and
+// opening it closes whichever other panel is open.
+fn attach_panel(ui: &Rc<Ui>, panel: Panel, expander: &adw::ExpanderRow) {
+    expander.set_expanded(expansion::is_open(ui.state.borrow().open_panel, panel));
+    ui.panels.borrow_mut().push((panel, expander.clone()));
+    let ui_ref = ui.clone();
+    expander.connect_expanded_notify(move |expander| {
+        let expanded = expander.is_expanded();
+        {
+            let mut state = ui_ref.state.borrow_mut();
+            state.open_panel = expansion::after_toggle(state.open_panel, panel, expanded);
+        }
+        if expanded {
+            let others: Vec<adw::ExpanderRow> = ui_ref
+                .panels
+                .borrow()
+                .iter()
+                .filter(|(other, _)| *other != panel)
+                .map(|(_, row)| row.clone())
+                .collect();
+            for other in others {
+                if other.is_expanded() {
+                    other.set_expanded(false);
+                }
+            }
+        }
+    });
+}
+
+// Forgets the rows shown for `panels` before their section is redrawn.
+fn detach_panels(ui: &Ui, panels: &[Panel]) {
+    ui.panels
+        .borrow_mut()
+        .retain(|(panel, _)| !panels.contains(panel));
+}
+
+// After a redraw: a panel that is no longer shown is no longer open.
+fn settle_panels(ui: &Ui, panels: &[Panel]) {
+    let shown: Vec<Panel> = ui.panels.borrow().iter().map(|(panel, _)| *panel).collect();
+    let mut state = ui.state.borrow_mut();
+    if let Some(open) = state.open_panel
+        && panels.contains(&open)
+        && !shown.contains(&open)
+    {
+        state.open_panel = None;
+    }
 }
 
 fn caption(text: &str) -> gtk::Label {
@@ -422,6 +473,7 @@ fn failed(name: String, error: &ImageSourceError) -> ImageState {
 }
 
 fn render_image(ui: &Rc<Ui>) {
+    detach_panels(ui, &[Panel::ImageDetails]);
     let state = ui.state.borrow();
     clear(&ui.image_box);
     let rows = list();
@@ -507,6 +559,7 @@ fn render_image(ui: &Rc<Ui>) {
             expander.add_prefix(&ok);
             expander.add_suffix(&choose("変更"));
             expander.set_tooltip_text(Some("開くと技術情報を表示します"));
+            attach_panel(ui, Panel::ImageDetails, &expander);
             rows.append(&expander);
         }
         ImageState::Failed {
@@ -521,10 +574,13 @@ fn render_image(ui: &Rc<Ui>) {
             expander.set_subtitle(&format!("{name} — {message}"));
             expander.add_prefix(&gtk::Image::from_icon_name("dialog-error-symbolic"));
             expander.add_suffix(&choose("別のイメージを選択"));
+            attach_panel(ui, Panel::ImageDetails, &expander);
             rows.append(&expander);
         }
     }
     ui.image_box.append(&rows);
+    drop(state);
+    settle_panels(ui, &[Panel::ImageDetails]);
 }
 
 // ---- TARGET ----
@@ -733,10 +789,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
     if !force && ui.state.borrow().target_view.as_ref() == Some(&view) {
         return;
     }
-    let (protected_expanded, details_expanded) = {
-        let state = ui.state.borrow();
-        (state.protected_expanded, state.details_expanded)
-    };
+    detach_panels(ui, &[Panel::TargetDetails, Panel::ProtectedDevices]);
     clear(&ui.target_box);
 
     if let Some(detail) = &view.failure {
@@ -776,7 +829,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                 "容量の大きい USB ドライブを接続してください",
             ));
         }
-        append_protected(ui, &rows, &view, protected_expanded);
+        append_protected(ui, &rows, &view);
         ui.target_box.append(&rows);
     } else {
         if !view.image_ready {
@@ -826,11 +879,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                     expander.add_suffix(&tag(note));
                 }
                 expander.set_tooltip_text(Some("開くとデバイスの詳細を表示します"));
-                expander.set_expanded(details_expanded);
-                let ui_ref = ui.clone();
-                expander.connect_expanded_notify(move |expander| {
-                    ui_ref.state.borrow_mut().details_expanded = expander.is_expanded();
-                });
+                attach_panel(ui, Panel::TargetDetails, &expander);
                 rows.append(&expander);
             } else {
                 let row = row(&entry.title, &entry.subtitle);
@@ -844,7 +893,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                 rows.append(&row);
             }
         }
-        append_protected(ui, &rows, &view, protected_expanded);
+        append_protected(ui, &rows, &view);
         ui.target_box.append(&rows);
     }
 
@@ -863,11 +912,12 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
     }
 
     ui.state.borrow_mut().target_view = Some(view);
+    settle_panels(ui, &[Panel::TargetDetails, Panel::ProtectedDevices]);
 }
 
 // The protected devices, collapsed to one line at the end of the target
 // list: never hidden, never selectable.
-fn append_protected(ui: &Rc<Ui>, rows: &gtk::ListBox, view: &TargetView, expanded: bool) {
+fn append_protected(ui: &Rc<Ui>, rows: &gtk::ListBox, view: &TargetView) {
     if view.protected.is_empty() {
         return;
     }
@@ -885,11 +935,7 @@ fn append_protected(ui: &Rc<Ui>, rows: &gtk::ListBox, view: &TargetView, expande
     for entry in &view.protected {
         expander.add_row(&row(&entry.title, &entry.subtitle));
     }
-    expander.set_expanded(expanded);
-    let ui_ref = ui.clone();
-    expander.connect_expanded_notify(move |expander| {
-        ui_ref.state.borrow_mut().protected_expanded = expander.is_expanded();
-    });
+    attach_panel(ui, Panel::ProtectedDevices, &expander);
     rows.append(&expander);
 }
 
