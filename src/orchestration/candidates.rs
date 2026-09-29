@@ -39,7 +39,9 @@ pub struct TargetRef {
 #[derive(Debug, Clone)]
 enum TargetOrigin {
     // Built from this snapshot by the candidate list (the library's
-    // `list_candidates`; the CLI binary never builds one).
+    // `list_candidates`; the CLI binary never builds one), or by Safe
+    // Removal from the snapshot a write FD was bound to
+    // (`from_bound_snapshot`).
     #[allow(dead_code)]
     Listed(DeviceSnapshot),
     // Only a block path was given: the CLI's argument. Never built by the
@@ -84,6 +86,19 @@ impl TargetRef {
         TargetRef {
             block_path: block_path.into(),
             origin: TargetOrigin::BlockPathOnly,
+        }
+    }
+
+    // A reference to the device a write FD was bound to: `snapshot` is the
+    // one the FD binding checked (`core::finalize_prepared_write`). It is
+    // then compared exactly like a listed reference (`check_against`).
+    // Crate-private: only the write operation may build one (Safe Removal;
+    // connected in a later step, hence unused for now).
+    #[allow(dead_code)]
+    pub(crate) fn from_bound_snapshot(snapshot: DeviceSnapshot) -> Self {
+        TargetRef {
+            block_path: snapshot.block_path.clone(),
+            origin: TargetOrigin::Listed(snapshot),
         }
     }
 

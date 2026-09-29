@@ -881,6 +881,129 @@ fn direct_read<'b>(
     Ok(&buf[skip..skip + want])
 }
 
+// ---- Safe Removal: Filesystem.Unmount and Drive.PowerOff ----
+//
+// The only two calls Safe Removal makes that change anything: they never
+// write to a device, but they unmount a filesystem and power a drive off.
+// What to unmount and which drive to power off is decided elsewhere
+// (`orchestration::removal`); these calls do exactly the one thing asked,
+// once, never retried and never with other options. Both forbid an
+// interactive authorization (`auth.no_user_interaction`): no polkit prompt
+// can hold the call open while the device might be exchanged. Unmount never
+// forces.
+
+// Why a Safe Removal call failed. Classified only by the D-Bus error name,
+// never by the message text, like `OpenDeviceError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalCallError {
+    // NotAuthorized / NotAuthorizedCanObtain / NotAuthorizedDismissed.
+    NotAuthorized(AuthorizationDenial),
+    // org.freedesktop.UDisks2.Error.DeviceBusy.
+    Busy,
+    // org.freedesktop.UDisks2.Error.NotMounted (Unmount only: the
+    // filesystem was already unmounted).
+    NotMounted,
+    // Any other error reply, by name; the message is for display only.
+    Rejected {
+        name: String,
+        message: Option<String>,
+    },
+    // The system bus could not be reached.
+    Connection(String),
+    // Not a reply from UDisks2 at all.
+    Transport(String),
+}
+
+const UDISKS2_DEVICE_BUSY: &str = "org.freedesktop.UDisks2.Error.DeviceBusy";
+const UDISKS2_NOT_MOUNTED: &str = "org.freedesktop.UDisks2.Error.NotMounted";
+
+fn removal_error_reply(error_name: &str, message: Option<&str>) -> RemovalCallError {
+    if let Some(denial) = authorization_denial(error_name) {
+        return RemovalCallError::NotAuthorized(denial);
+    }
+    match error_name {
+        UDISKS2_DEVICE_BUSY => RemovalCallError::Busy,
+        UDISKS2_NOT_MOUNTED => RemovalCallError::NotMounted,
+        _ => RemovalCallError::Rejected {
+            name: error_name.to_string(),
+            message: message.map(str::to_string),
+        },
+    }
+}
+
+fn removal_call_error(error: zbus::Error) -> RemovalCallError {
+    use zbus::DBusError;
+
+    match error {
+        zbus::Error::MethodError(name, message, _reply) => {
+            removal_error_reply(name.as_str(), message.as_deref())
+        }
+        zbus::Error::FDO(error) => removal_error_reply(error.name().as_str(), error.description()),
+        other => RemovalCallError::Transport(other.to_string()),
+    }
+}
+
+// `Filesystem.Unmount`'s options: never forced, never interactive.
+fn unmount_options() -> HashMap<String, OwnedValue> {
+    HashMap::from([
+        ("force".to_string(), OwnedValue::from(false)),
+        (
+            "auth.no_user_interaction".to_string(),
+            OwnedValue::from(true),
+        ),
+    ])
+}
+
+// `Drive.PowerOff`'s options: never interactive.
+fn power_off_options() -> HashMap<String, OwnedValue> {
+    HashMap::from([(
+        "auth.no_user_interaction".to_string(),
+        OwnedValue::from(true),
+    )])
+}
+
+// One call of `method` on `interface` of `object_path`, with `options`.
+fn call_udisks2(
+    object_path: &str,
+    interface: &str,
+    method: &str,
+    options: HashMap<String, OwnedValue>,
+) -> Result<(), RemovalCallError> {
+    let connection =
+        Connection::system().map_err(|error| RemovalCallError::Connection(error.to_string()))?;
+    let proxy = Proxy::new(
+        &connection,
+        "org.freedesktop.UDisks2",
+        object_path,
+        interface,
+    )
+    .map_err(removal_call_error)?;
+    proxy
+        .call::<_, _, ()>(method, &(options,))
+        .map_err(removal_call_error)
+}
+
+// Unmounts the filesystem of the Block object `block_object_path` (one
+// mount point per call, as UDisks2 does).
+pub fn unmount_filesystem(block_object_path: &str) -> Result<(), RemovalCallError> {
+    call_udisks2(
+        block_object_path,
+        "org.freedesktop.UDisks2.Filesystem",
+        "Unmount",
+        unmount_options(),
+    )
+}
+
+// Asks UDisks2 to power off the drive `drive_path`.
+pub fn power_off_drive(drive_path: &str) -> Result<(), RemovalCallError> {
+    call_udisks2(
+        drive_path,
+        "org.freedesktop.UDisks2.Drive",
+        "PowerOff",
+        power_off_options(),
+    )
+}
+
 // Explicit, named close so call sites make the "no write happened" intent
 // visible instead of relying on an implicit Drop.
 // Used only by the CLI binary (`open-test`); unused in the library build.
@@ -1698,5 +1821,95 @@ mod tests {
         let error = direct_read(&mut read, &g, &mut buffer, 0, 8192).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(attempts, 0);
+    }
+
+    // ---- Safe Removal calls ----
+
+    // Unmount is never forced and never interactive: exactly these two
+    // options, both D-Bus booleans (`b`).
+    #[test]
+    fn unmount_is_not_forced_and_not_interactive() {
+        let options = unmount_options();
+        assert_eq!(options.len(), 2);
+        assert!(matches!(
+            *options["force"],
+            zbus::zvariant::Value::Bool(false)
+        ));
+        assert!(matches!(
+            *options["auth.no_user_interaction"],
+            zbus::zvariant::Value::Bool(true)
+        ));
+    }
+
+    // PowerOff is never interactive: exactly this one option, a D-Bus
+    // boolean.
+    #[test]
+    fn power_off_is_not_interactive() {
+        let options = power_off_options();
+        assert_eq!(options.len(), 1);
+        assert!(matches!(
+            *options["auth.no_user_interaction"],
+            zbus::zvariant::Value::Bool(true)
+        ));
+    }
+
+    // Removal errors are classified by name only: authorization, busy and
+    // not-mounted by their exact UDisks2 names; anything else is Rejected
+    // with its name, whatever the message says; a non-reply is Transport.
+    #[test]
+    fn removal_errors_are_classified_by_exact_name() {
+        let cases = [
+            (
+                "org.freedesktop.UDisks2.Error.NotAuthorizedCanObtain",
+                RemovalCallError::NotAuthorized(AuthorizationDenial::CanObtain),
+            ),
+            (
+                "org.freedesktop.UDisks2.Error.NotAuthorized",
+                RemovalCallError::NotAuthorized(AuthorizationDenial::NotAuthorized),
+            ),
+            (
+                "org.freedesktop.UDisks2.Error.NotAuthorizedDismissed",
+                RemovalCallError::NotAuthorized(AuthorizationDenial::Dismissed),
+            ),
+            (
+                "org.freedesktop.UDisks2.Error.DeviceBusy",
+                RemovalCallError::Busy,
+            ),
+            (
+                "org.freedesktop.UDisks2.Error.NotMounted",
+                RemovalCallError::NotMounted,
+            ),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                removal_call_error(method_error(name, "anything")),
+                expected,
+                "{name}"
+            );
+        }
+
+        // A message that sounds like "busy" or "not mounted" changes
+        // nothing: only the name counts.
+        for name in [
+            "org.freedesktop.UDisks2.Error.Failed",
+            "org.freedesktop.UDisks2.Error.DeviceBusyish",
+            "org.example.NotMounted",
+        ] {
+            assert_eq!(
+                removal_call_error(method_error(name, "Device is busy; not mounted")),
+                RemovalCallError::Rejected {
+                    name: name.to_string(),
+                    message: Some("Device is busy; not mounted".to_string()),
+                },
+                "{name}"
+            );
+        }
+
+        assert!(matches!(
+            removal_call_error(zbus::Error::InputOutput(std::sync::Arc::new(
+                io::Error::other("broken pipe")
+            ))),
+            RemovalCallError::Transport(_)
+        ));
     }
 }

@@ -49,6 +49,8 @@ use super::events::{ConfirmationDecision, OpenPurpose, OperationEvent, Operation
 use super::operation::{ConfirmationRequest, WriteOperationRequest, run_on};
 use super::outcome::OperationOutcome;
 use super::platform::{LinuxPlatform, Platform};
+use super::removal::{RemovalTarget, removal_allowed};
+use crate::device::DeviceSnapshot;
 use crate::execution::core::{SelectionState, VerifyMode, VerifyTargetDiagnostics};
 use crate::execution::linux_access::FdMetadata;
 use crate::execution::write_job::{CancelHandle, CancelReason, VerifyProgress};
@@ -267,6 +269,17 @@ impl WorkerConfirmationRequest {
     }
 }
 
+// What actually crosses the worker's channel: the public messages, and at
+// the end the outcome together with Safe Removal's reference when this
+// outcome offers one. Private: a UI only ever receives `WorkerMessage`.
+enum Delivery {
+    Message(WorkerMessage),
+    Finished {
+        outcome: Box<OperationOutcome>,
+        removal: Option<RemovalTarget>,
+    },
+}
+
 // Everything the worker sends to the UI, in the order it happens. After
 // `Finished` the worker sends nothing more and its thread ends.
 /// Everything the worker sends to the UI, in order; `Finished` is last.
@@ -311,11 +324,13 @@ pub enum SubmitError {
 // The UI side of one write operation running on its own thread.
 /// The UI side of one write operation running on its own thread.
 pub struct WriteWorker {
-    messages: Receiver<WorkerMessage>,
+    messages: Receiver<Delivery>,
     decisions: Option<Sender<ConfirmationDecision>>,
     cancel: CancelHandle,
     thread: Option<JoinHandle<()>>,
     state: WorkerState,
+    // Set only when `Finished` is received (see `removal_target`).
+    removal: Option<RemovalTarget>,
 }
 
 // Starts `request` on a new thread with the production platform (the
@@ -342,10 +357,17 @@ fn spawn_on<P: Platform + Send + 'static>(
                 messages: message_sender.clone(),
                 decisions,
                 cancel: worker_cancel.clone(),
+                bound: None,
             };
             let outcome = run_on(&platform, request, &worker_cancel, &mut observer);
+            // `run_on` has returned: every device FD the operation opened is
+            // closed. Only now may Safe Removal's reference exist.
+            let removal = removal_for(observer.bound.take(), &outcome);
             // The UI may already be gone; the operation has ended either way.
-            let _ = message_sender.send(WorkerMessage::Finished(Box::new(outcome)));
+            let _ = message_sender.send(Delivery::Finished {
+                outcome: Box::new(outcome),
+                removal,
+            });
         })?;
 
     Ok(WriteWorker {
@@ -354,7 +376,17 @@ fn spawn_on<P: Platform + Send + 'static>(
         cancel,
         thread: Some(thread),
         state: WorkerState::Started,
+        removal: None,
     })
+}
+
+// Safe Removal's reference for a finished operation: only if the write
+// started on a bound target (`bound`) and the outcome offers removal
+// (`removal::removal_allowed`, the one place that rule is written).
+fn removal_for(bound: Option<DeviceSnapshot>, outcome: &OperationOutcome) -> Option<RemovalTarget> {
+    bound
+        .filter(|_| removal_allowed(outcome))
+        .map(RemovalTarget::from_bound_snapshot)
 }
 
 impl WriteWorker {
@@ -370,6 +402,17 @@ impl WriteWorker {
         self.cancel.clone()
     }
 
+    // Safe Removal's reference to the device this operation wrote to:
+    // `None` until `Finished` has been received, and after it `Some` only if
+    // the write started and the outcome offers removal. Take it before
+    // `join`, which consumes the worker.
+    /// The device this operation wrote to, for safe removal: `None` until
+    /// [`WorkerMessage::Finished`] has been received, then `Some` only if
+    /// the write started and the outcome allows removal.
+    pub fn removal_target(&self) -> Option<RemovalTarget> {
+        self.removal.clone()
+    }
+
     /// Asks the operation to stop at its next cancel point.
     pub fn request_cancel(&self) {
         self.cancel.request_cancel(CancelReason::UserRequested);
@@ -380,7 +423,7 @@ impl WriteWorker {
     /// Waits for the next message; `None` once nothing more will come.
     pub fn recv(&mut self) -> Option<WorkerMessage> {
         match self.messages.recv() {
-            Ok(message) => Some(self.observe(message)),
+            Ok(delivery) => Some(self.observe(delivery)),
             Err(_) => {
                 self.channel_closed();
                 None
@@ -392,7 +435,7 @@ impl WriteWorker {
     /// The next message if one is waiting.
     pub fn try_recv(&mut self) -> Result<WorkerMessage, TryRecvError> {
         match self.messages.try_recv() {
-            Ok(message) => Ok(self.observe(message)),
+            Ok(delivery) => Ok(self.observe(delivery)),
             Err(TryRecvError::Disconnected) => {
                 self.channel_closed();
                 Err(TryRecvError::Disconnected)
@@ -404,7 +447,7 @@ impl WriteWorker {
     /// Waits up to `timeout` for the next message.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<WorkerMessage, RecvTimeoutError> {
         match self.messages.recv_timeout(timeout) {
-            Ok(message) => Ok(self.observe(message)),
+            Ok(delivery) => Ok(self.observe(delivery)),
             Err(RecvTimeoutError::Disconnected) => {
                 self.channel_closed();
                 Err(RecvTimeoutError::Disconnected)
@@ -446,7 +489,14 @@ impl WriteWorker {
         }
     }
 
-    fn observe(&mut self, message: WorkerMessage) -> WorkerMessage {
+    fn observe(&mut self, delivery: Delivery) -> WorkerMessage {
+        let message = match delivery {
+            Delivery::Message(message) => message,
+            Delivery::Finished { outcome, removal } => {
+                self.removal = removal;
+                WorkerMessage::Finished(outcome)
+            }
+        };
         self.state = match &message {
             WorkerMessage::Event(_) => match self.state {
                 WorkerState::Started => WorkerState::Running,
@@ -475,25 +525,35 @@ impl WriteWorker {
 // The operation's observer on the worker thread: forwards owned copies of
 // events and confirmation requests, and waits for the UI's decision.
 struct ChannelObserver {
-    messages: Sender<WorkerMessage>,
+    messages: Sender<Delivery>,
     decisions: Receiver<ConfirmationDecision>,
     cancel: CancelHandle,
+    // The snapshot the write FD was bound to, once the write started.
+    bound: Option<DeviceSnapshot>,
 }
 
 impl OperationObserver for ChannelObserver {
     fn on_event(&mut self, event: OperationEvent<'_>) {
         // A UI that went away does not stop the operation mid-step; its own
         // cancel points and the confirmation (below) still apply.
-        let _ = self
-            .messages
-            .send(WorkerMessage::Event(WorkerEvent::from_operation(event)));
+        let _ = self.messages.send(Delivery::Message(WorkerMessage::Event(
+            WorkerEvent::from_operation(event),
+        )));
+    }
+
+    // Kept, not sent: it becomes Safe Removal's reference only after the
+    // operation ended (`removal_for`).
+    fn write_started_on(&mut self, bound: DeviceSnapshot) {
+        self.bound = Some(bound);
     }
 
     fn request_confirmation(&mut self, request: &ConfirmationRequest<'_>) -> ConfirmationDecision {
         let request = WorkerConfirmationRequest::from_operation(request);
         if self
             .messages
-            .send(WorkerMessage::ConfirmationRequested(request))
+            .send(Delivery::Message(WorkerMessage::ConfirmationRequested(
+                request,
+            )))
             .is_err()
         {
             // Nobody can answer: never an implicit yes.
@@ -529,7 +589,7 @@ impl OperationObserver for ChannelObserver {
 #[cfg(test)]
 mod tests {
     use super::super::operation::ConfirmError;
-    use super::super::outcome::{CancelledAt, OperationError};
+    use super::super::outcome::{CancelledAt, OperationError, VerifyNotStarted};
     use super::super::test_support::*;
     use super::*;
     use crate::device::SnapshotFetchOutcome;
@@ -576,9 +636,14 @@ mod tests {
         let mut answer = Some(answer);
         let mut events = Vec::new();
         let mut states = vec![worker.state()];
+        assert!(worker.removal_target().is_none(), "before anything arrived");
         loop {
             let message = worker.recv().expect("the worker ended without an outcome");
             states.push(worker.state());
+            // Safe Removal's reference never exists before `Finished`.
+            if !matches!(message, WorkerMessage::Finished(_)) {
+                assert!(worker.removal_target().is_none(), "before Finished");
+            }
             match message {
                 WorkerMessage::Event(event) => events.push(event),
                 WorkerMessage::ConfirmationRequested(request) => {
@@ -624,6 +689,7 @@ mod tests {
         crosses::<ConfirmationDecision>();
         crosses::<OperationOutcome>();
         crosses::<CancelHandle>();
+        crosses::<RemovalTarget>();
 
         trait AmbiguousIfSend<A> {
             fn check() {}
@@ -1046,6 +1112,249 @@ mod tests {
         .unwrap();
         assert!(worker.recv().is_none());
         assert_eq!(worker.state(), WorkerState::Lost);
+        assert!(
+            worker.removal_target().is_none(),
+            "no outcome, no reference"
+        );
         assert!(worker.join().is_err());
+    }
+
+    // ---- Safe Removal's reference ----
+
+    // Runs one operation to its end (the UI types the device name) and
+    // returns the outcome and what `removal_target` gives after `Finished`
+    // -- taken before `join`, which then still ends the worker normally.
+    fn removal_after(
+        platform: ScriptedPlatform,
+        image: &TempImage,
+        verify_mode: VerifyMode,
+    ) -> (OperationOutcome, Option<RemovalTarget>) {
+        let mut worker = spawn_on(platform, request(image, verify_mode)).unwrap();
+        let run = drive(&mut worker, |_| {
+            ConfirmationDecision::Submitted("/dev/sdx".to_string())
+        });
+        let removal = worker.removal_target();
+        let final_state = worker.state();
+        assert_ended(worker, final_state);
+        (run.outcome, removal)
+    }
+
+    // The reference is the device the write started on: the same device
+    // and instance pass Safe Removal's check, a recreated one does not.
+    fn assert_anchored_to_the_written_device(removal: Option<RemovalTarget>) {
+        use super::super::removal::decide;
+        use crate::device::{RemovalFacts, RemovalFactsOutcome, UsbTopology};
+        let removal = removal.expect("a reference after Finished");
+        let facts = |snapshot| {
+            RemovalFactsOutcome::Found(Box::new(RemovalFacts {
+                snapshot,
+                can_power_off: true,
+                sibling_id: "/sys/devices/usb2/2-1/2-1:1.0".to_string(),
+                other_siblings: 0,
+                usb: UsbTopology::Bound { interfaces: 1 },
+                filesystems: Vec::new(),
+            }))
+        };
+        assert!(decide(&removal, facts(usb_stick())).is_ok());
+        assert!(decide(&removal, facts(recreated())).is_err());
+    }
+
+    // After `Finished`, a completed operation offers removal whatever its
+    // Verify mode, as do a failed write and a failed Verify -- the write
+    // started in each. The reference is taken, then the worker joins.
+    #[test]
+    fn removal_is_offered_after_an_operation_that_wrote() {
+        let data = payload();
+        let image = temp_image("removal-offered", "img", &data);
+        for mode in [VerifyMode::Quick, VerifyMode::Full, VerifyMode::None] {
+            let target = temp_image("removal-offered-target", "device", b"");
+            let (outcome, removal) = removal_after(
+                ScriptedPlatform::with_device(snapshots(mode != VerifyMode::None), device(&target)),
+                &image,
+                mode,
+            );
+            assert!(
+                matches!(outcome, OperationOutcome::Completed { .. }),
+                "{outcome:?}"
+            );
+            assert_anchored_to_the_written_device(removal);
+        }
+
+        let target = temp_image("removal-offered-target", "device", b"");
+        let (outcome, removal) = removal_after(
+            ScriptedPlatform::with_device(
+                snapshots(false),
+                Device {
+                    read_only_write_fd: true,
+                    ..device(&target)
+                },
+            ),
+            &image,
+            VerifyMode::None,
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::Write { .. })
+        ));
+        assert_anchored_to_the_written_device(removal);
+
+        let target = temp_image("removal-offered-target", "device", b"");
+        let mut tampered = data.clone();
+        tampered[100] ^= 0x5a;
+        let other = temp_image("removal-offered-read", "device", &tampered);
+        let (outcome, removal) = removal_after(
+            ScriptedPlatform::with_device(
+                snapshots(true),
+                Device {
+                    verify_from: Some(other.0.clone()),
+                    ..device(&target)
+                },
+            ),
+            &image,
+            VerifyMode::Full,
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::Verify { .. })
+        ));
+        assert_anchored_to_the_written_device(removal);
+    }
+
+    // No reference when nothing was written (a refused confirmation, a
+    // failed FD binding), and none when Verify's own re-check found the
+    // target changed -- although the write did start there.
+    #[test]
+    fn no_removal_without_a_write_or_after_a_changed_verify_target() {
+        let image = temp_image("removal-refused", "img", &payload());
+
+        let target = temp_image("removal-refused-target", "device", b"");
+        let mut worker = spawn_on(
+            ScriptedPlatform::with_device(snapshots(false), device(&target)),
+            request(&image, VerifyMode::None),
+        )
+        .unwrap();
+        let run = drive(&mut worker, |_| {
+            ConfirmationDecision::Submitted("/dev/sda".to_string())
+        });
+        assert!(matches!(
+            run.outcome,
+            OperationOutcome::Failed(OperationError::Confirmation(ConfirmError::Mismatch))
+        ));
+        assert!(worker.removal_target().is_none());
+        assert_ended(worker, WorkerState::Failed);
+
+        let target = temp_image("removal-refused-target", "device", b"");
+        let (outcome, removal) = removal_after(
+            ScriptedPlatform::with_device(
+                snapshots(false),
+                Device {
+                    wrong_metadata: true,
+                    ..device(&target)
+                },
+            ),
+            &image,
+            VerifyMode::None,
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::WriteDeviceRejected { .. })
+        ));
+        assert!(removal.is_none());
+
+        let target = temp_image("removal-refused-target", "device", b"");
+        let (outcome, removal) = removal_after(
+            ScriptedPlatform::with_device(
+                vec![
+                    found(usb_stick()),
+                    found(usb_stick()),
+                    found(usb_stick()),
+                    found(recreated()),
+                ],
+                device(&target),
+            ),
+            &image,
+            VerifyMode::Full,
+        );
+        assert!(
+            matches!(
+                outcome,
+                OperationOutcome::Failed(OperationError::VerifyNotStarted(
+                    VerifyNotStarted::TargetCheck { .. }
+                ))
+            ),
+            "{outcome:?}"
+        );
+        assert!(removal.is_none());
+    }
+
+    // A cancellation during the write ends as Cancelled(Write) or, if the
+    // write finished first, Cancelled(AfterSync): both offer removal.
+    #[test]
+    fn removal_is_offered_after_a_cancelled_write() {
+        let data: Vec<u8> = (0..16 * 1024 * 1024u32).map(|i| (i % 241) as u8).collect();
+        let image = temp_image("removal-cancel", "img", &data);
+        let target = temp_image("removal-cancel-target", "device", b"");
+        let mut worker = spawn_on(
+            ScriptedPlatform::with_device(snapshots(true), device(&target)),
+            request(&image, VerifyMode::Full),
+        )
+        .unwrap();
+        let outcome = loop {
+            let message = worker.recv().unwrap();
+            if !matches!(message, WorkerMessage::Finished(_)) {
+                assert!(worker.removal_target().is_none(), "before Finished");
+            }
+            match message {
+                WorkerMessage::Event(event) => {
+                    if matches!(event, WorkerEvent::WriteStarted) {
+                        worker.request_cancel();
+                    }
+                }
+                WorkerMessage::ConfirmationRequested(_) => worker
+                    .submit_confirmation(ConfirmationDecision::Submitted("/dev/sdx".to_string()))
+                    .unwrap(),
+                WorkerMessage::Finished(outcome) => break *outcome,
+            }
+        };
+        assert!(
+            matches!(
+                outcome,
+                OperationOutcome::Cancelled(CancelledAt::Write { .. } | CancelledAt::AfterSync)
+            ),
+            "{outcome:?}"
+        );
+        assert_anchored_to_the_written_device(worker.removal_target());
+        assert_ended(worker, WorkerState::Cancelled);
+    }
+
+    // What the worker hands out after `Finished` is exactly the shared rule
+    // (`removal_allowed`) for every outcome -- including those a scripted
+    // run cannot produce (a Verify cancelled mid-way, a failed sync, a sync
+    // worker panic, the CLI's test pause) -- and nothing without a started
+    // write.
+    #[test]
+    fn the_worker_applies_the_shared_rule_to_every_outcome() {
+        for (name, outcome, offered) in super::super::removal::tests::every_outcome() {
+            assert_eq!(
+                removal_for(Some(usb_stick()), &outcome).is_some(),
+                offered,
+                "{name}"
+            );
+            assert!(removal_for(None, &outcome).is_none(), "{name}");
+        }
+    }
+
+    // The public message set is unchanged: this match lists every variant
+    // and has no wildcard, so an added one fails to compile here.
+    #[test]
+    fn the_public_messages_are_unchanged() {
+        fn every_variant(message: WorkerMessage) {
+            match message {
+                WorkerMessage::Event(_)
+                | WorkerMessage::ConfirmationRequested(_)
+                | WorkerMessage::Finished(_) => {}
+            }
+        }
+        let _ = every_variant;
     }
 }

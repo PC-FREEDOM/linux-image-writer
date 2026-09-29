@@ -5,15 +5,17 @@
 // `compile_fail` doc tests in src/lib.rs.
 
 use linux_usb_writer::report::{
-    CompressionFormat, DeviceSnapshot, FdMetadata, ImageSourceError, SelectionState,
-    UnsupportedCompression, VerifyTargetDiagnostics, WriteGateError,
+    AuthorizationDenial, CompressionFormat, DeviceSnapshot, FdMetadata, ImageSourceError,
+    RemovalActionError, RemovalStage, RemovalUnavailable, RemovalUnsupported, SelectionState,
+    TargetChange, UnsupportedCompression, VerifyTargetDiagnostics, WriteGateError,
 };
 use linux_usb_writer::{
-    CancelHandle, CancelReason, CancelledAt, ConfirmationDecision, DeviceCandidate, ImageAccess,
-    ImageInfo, OperationError, OperationOutcome, Selectability, SubmitError, TargetRef,
-    VerifyAvailability, VerifyMode, VerifyNotStarted, VerifyUnavailableReason,
-    WorkerConfirmationRequest, WorkerEvent, WorkerMessage, WorkerState, WriteOperationRequest,
-    WriteWorker, inspect_image, list_candidates, spawn_write_worker,
+    CancelHandle, CancelReason, CancelledAt, ConfirmationDecision, DeviceCandidate, DeviceDisplay,
+    ImageAccess, ImageInfo, OperationError, OperationOutcome, RemovalTarget, SafeRemovalOutcome,
+    Selectability, SubmitError, TargetRef, VerifyAvailability, VerifyMode, VerifyNotStarted,
+    VerifyUnavailableReason, WorkerConfirmationRequest, WorkerEvent, WorkerMessage, WorkerState,
+    WriteOperationRequest, WriteWorker, inspect_image, list_candidates, request_safe_removal,
+    spawn_write_worker,
 };
 
 // The whole path a GUI takes, type-checked but never run: list devices,
@@ -21,7 +23,8 @@ use linux_usb_writer::{
 // only while the refreshed entry is the same device and instance, inspect
 // the image and pick a Verify mode its format allows, build a request,
 // start the worker, handle its messages, answer the confirmation (the
-// user's explicit approval, or typed text), cancel, join.
+// user's explicit approval, or typed text), cancel, take the Safe Removal
+// reference after `Finished`, join.
 #[allow(dead_code)]
 fn gui_flow(image_path: &str, typed: Option<String>) -> Option<OperationOutcome> {
     let candidates: Vec<DeviceCandidate> = list_candidates().ok()?;
@@ -76,6 +79,8 @@ fn gui_flow(image_path: &str, typed: Option<String>) -> Option<OperationOutcome>
             WorkerMessage::Finished(finished) => outcome = Some(*finished),
         }
     }
+    // After `Finished` and before `join` (which consumes the worker).
+    let _removal: Option<RemovalTarget> = worker.removal_target();
     worker.join().ok()?;
     outcome
 }
@@ -310,4 +315,92 @@ fn boundary_values_can_cross_threads() {
     crosses::<CancelHandle>();
     crosses::<OperationOutcome>();
     crosses::<ImageInfo>();
+    crosses::<RemovalTarget>();
+}
+
+// A removal target is something a UI can hold on to (and show in a debug
+// log) -- but not build, read or convert (see the `compile_fail` doc
+// tests in src/lib.rs).
+#[test]
+fn a_removal_target_can_be_held_but_not_built() {
+    fn holdable<T: Clone + std::fmt::Debug + Send + 'static>() {}
+    holdable::<RemovalTarget>();
+}
+
+// Safe removal as a GUI uses it, type-checked but never run: the reference
+// the finished operation hands out, the blocking request (off the UI
+// thread), and every outcome read with public types only.
+#[allow(dead_code)]
+fn safe_removal_flow(worker: &WriteWorker) -> Option<&'static str> {
+    let target: RemovalTarget = worker.removal_target()?;
+    let outcome = std::thread::spawn(move || request_safe_removal(&target))
+        .join()
+        .ok()?;
+    Some(describe_removal(&outcome))
+}
+
+// Every removal outcome, matched without a wildcard.
+fn describe_removal(outcome: &SafeRemovalOutcome) -> &'static str {
+    let stage = |stage: &RemovalStage| match stage {
+        RemovalStage::Unmount => "unmount",
+        RemovalStage::PowerOff => "power-off",
+    };
+    match outcome {
+        SafeRemovalOutcome::Removed { device, unmounted } => {
+            let _: (&DeviceDisplay, &Vec<String>) = (device, unmounted);
+            "removed"
+        }
+        SafeRemovalOutcome::DeviceGone => "gone",
+        SafeRemovalOutcome::DeviceChanged(change) => match change {
+            TargetChange::DifferentTarget | TargetChange::Device { .. } => "changed",
+        },
+        SafeRemovalOutcome::Unsupported(reason) => match reason {
+            RemovalUnsupported::NotUsb
+            | RemovalUnsupported::CannotPowerOff
+            | RemovalUnsupported::SharedPhysicalDevice
+            | RemovalUnsupported::TopologyUnknown
+            | RemovalUnsupported::ProtectedDevice
+            | RemovalUnsupported::CriticalMount
+            | RemovalUnsupported::ActiveSwap
+            | RemovalUnsupported::ComplexStorage
+            | RemovalUnsupported::UnrecognizedLayout => "unsupported",
+        },
+        SafeRemovalOutcome::Busy { stage: at, .. } => stage(at),
+        SafeRemovalOutcome::NotAuthorized { denial, .. } => match denial {
+            AuthorizationDenial::NotAuthorized
+            | AuthorizationDenial::CanObtain
+            | AuthorizationDenial::Dismissed => "not authorized",
+        },
+        SafeRemovalOutcome::Unavailable(reason) => match reason {
+            RemovalUnavailable::DeviceInformation(_)
+            | RemovalUnavailable::MountInformation
+            | RemovalUnavailable::NoAnchor => "unavailable",
+        },
+        SafeRemovalOutcome::Failed { error, .. } => match error {
+            RemovalActionError::Rejected { .. }
+            | RemovalActionError::Transport(_)
+            | RemovalActionError::Connection(_) => "failed",
+        },
+    }
+}
+
+// Removal outcomes are plain values a UI builds messages from.
+#[test]
+fn removal_outcomes_are_plain_values_a_ui_can_inspect() {
+    assert_eq!(describe_removal(&SafeRemovalOutcome::DeviceGone), "gone");
+    assert_eq!(
+        describe_removal(&SafeRemovalOutcome::Busy {
+            stage: RemovalStage::PowerOff,
+            unmounted: vec!["/mnt/a".to_string()],
+        }),
+        "power-off"
+    );
+    assert_eq!(
+        describe_removal(&SafeRemovalOutcome::Unsupported(
+            RemovalUnsupported::SharedPhysicalDevice
+        )),
+        "unsupported"
+    );
+    fn crosses<T: Send + 'static>() {}
+    crosses::<SafeRemovalOutcome>();
 }

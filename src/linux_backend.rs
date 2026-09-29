@@ -7,6 +7,10 @@ use zbus::{
 
 use crate::device::{DeviceSnapshot, SnapshotFetchOutcome};
 
+// What Safe Removal reads (one tree, plus sysfs); built on the helpers
+// below without changing them.
+pub(crate) mod removal_facts;
+
 fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .trim_end_matches('\0')

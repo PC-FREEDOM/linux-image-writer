@@ -497,6 +497,10 @@ pub(super) fn run_on(
             }
         };
 
+    // The snapshot the FD binding checks, kept for Safe Removal: it is what
+    // `finalize_prepared_write` keeps as the write's baseline, and it is
+    // handed on only if the binding passes and the write starts.
+    let bound = ready.current().clone();
     let prepared = match core::finalize_prepared_write(ready, handle, metadata.as_ref()) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -528,6 +532,7 @@ pub(super) fn run_on(
         Err(error) => return Failed(OperationError::ReaderOpen(error)),
     };
     observer.on_event(OperationEvent::WriteStarted);
+    observer.write_started_on(bound);
 
     let (image, write_outcome) =
         writing.write(|progress| observer.on_event(OperationEvent::WriteProgress(progress)));
@@ -1156,6 +1161,9 @@ mod tests {
         events: Vec<String>,
         cancel_on: Option<(&'static str, CancelHandle)>,
         pause: Option<bool>,
+        // Every snapshot `write_started_on` handed on (kept apart from the
+        // events, whose exact order other tests check).
+        bound: Vec<DeviceSnapshot>,
     }
 
     impl TestObserver {
@@ -1169,6 +1177,7 @@ mod tests {
                 events: Vec::new(),
                 cancel_on: None,
                 pause: None,
+                bound: Vec::new(),
             }
         }
 
@@ -1212,6 +1221,10 @@ mod tests {
                 Some(answer) => answer,
                 None => true,
             }
+        }
+
+        fn write_started_on(&mut self, bound: DeviceSnapshot) {
+            self.bound.push(bound);
         }
     }
 
@@ -1577,6 +1590,125 @@ mod tests {
         assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
     }
 
+    // Safe Removal's anchor: handed on once, right after the write started,
+    // and it is the snapshot the write FD was bound to -- the fresh Write
+    // Gate's (here with a device node the selection never saw), not the
+    // selection's. A write that fails still started, so it is handed on.
+    #[test]
+    fn the_bound_target_is_handed_on_once_the_write_started() {
+        let image = temp_image("bound-run", "img", &payload());
+        let target = target_file("bound-run");
+        let mut renamed = usb_stick();
+        renamed.device = "/dev/sdy".to_string();
+        let platform = ScriptedPlatform::with_device(
+            vec![found(usb_stick()), found(usb_stick()), found(renamed)],
+            device(&target),
+        );
+        let mut observer = TestObserver::answering("/dev/sdx");
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::None,
+            &CancelHandle::new(),
+            &mut observer,
+        );
+        assert!(
+            matches!(outcome, OperationOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(observer.bound.len(), 1);
+        assert_eq!(observer.bound[0].device, "/dev/sdy");
+        assert_eq!(observer.bound[0].block_path, usb_stick().block_path);
+        assert_eq!(observer.bound[0].diskseq, usb_stick().diskseq);
+
+        let target = target_file("bound-run-fail");
+        let platform = ScriptedPlatform::with_device(
+            snapshots(false, false),
+            Device {
+                read_only_write_fd: true,
+                ..device(&target)
+            },
+        );
+        let mut observer = TestObserver::answering("/dev/sdx");
+        let outcome = run(
+            &platform,
+            &image,
+            VerifyMode::None,
+            &CancelHandle::new(),
+            &mut observer,
+        );
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Failed(OperationError::Write { .. })
+        ));
+        assert_eq!(observer.bound.len(), 1);
+    }
+
+    // No anchor unless the write started: not when the confirmation is
+    // refused, the fresh Write Gate refuses, OpenDevice fails, or the FD
+    // binding does not match (that snapshot is never handed on).
+    #[test]
+    fn no_bound_target_without_a_started_write() {
+        let image = temp_image("unbound-run", "img", &payload());
+        let cases: [(&str, Vec<SnapshotFetchOutcome>, Device, &str); 4] = [
+            (
+                "confirmation",
+                snapshots(false, false),
+                Device::default(),
+                "/dev/sdz",
+            ),
+            (
+                "gate",
+                vec![found(usb_stick()), found(usb_stick()), found(recreated())],
+                Device::default(),
+                "/dev/sdx",
+            ),
+            (
+                "open",
+                snapshots(false, false),
+                Device {
+                    fail: vec![OpenAccess::WriteExclusive],
+                    ..Device::default()
+                },
+                "/dev/sdx",
+            ),
+            (
+                "binding",
+                snapshots(false, false),
+                Device {
+                    wrong_metadata: true,
+                    ..Device::default()
+                },
+                "/dev/sdx",
+            ),
+        ];
+        for (name, answers, device_setup, typed) in cases {
+            let target = target_file("unbound-run");
+            let platform = ScriptedPlatform::with_device(
+                answers,
+                Device {
+                    path: target.0.clone(),
+                    ..device_setup
+                },
+            );
+            let mut observer = TestObserver::answering(typed);
+            let outcome = run(
+                &platform,
+                &image,
+                VerifyMode::None,
+                &CancelHandle::new(),
+                &mut observer,
+            );
+            assert!(
+                matches!(outcome, OperationOutcome::Failed(_)),
+                "{name}: {outcome:?}"
+            );
+            assert!(!observer.saw("WriteStarted"), "{name}");
+            assert!(observer.bound.is_empty(), "{name}");
+            assert!(contents(&target).is_empty(), "{name}");
+        }
+    }
+
     // 26.13: a cancellation during the write stops it at the writer's own
     // per-chunk check; nothing is synced or verified.
     #[test]
@@ -1812,9 +1944,11 @@ mod tests {
             "operation.fresh_gate(refreshed)",
             "platform.open_device(&ready.current().block_path, OpenAccess::WriteExclusive)",
             "platform.fd_metadata(&handle)",
+            "let bound = ready.current().clone()",
             "core::finalize_prepared_write(ready, handle, metadata.as_ref())",
             "operation.bind(prepared.begin())",
             "execution.begin_write(cancel.clone())",
+            "observer.write_started_on(bound)",
             "writing.write(",
             "run_off_main_thread(succeeded.begin_sync()",
             "after_successful_sync(cancel.is_requested())",

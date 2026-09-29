@@ -13,6 +13,7 @@ pub(crate) mod image;
 pub(crate) mod operation;
 pub(crate) mod outcome;
 pub(crate) mod platform;
+pub(crate) mod removal;
 pub(crate) mod sync_worker;
 #[cfg(test)]
 mod test_support;

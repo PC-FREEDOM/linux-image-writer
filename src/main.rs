@@ -5,6 +5,8 @@ mod image_source;
 mod linux_backend;
 mod linux_monitor;
 mod orchestration;
+mod removal_check;
+mod safe_removal_test;
 mod safety;
 mod writer;
 
@@ -121,6 +123,8 @@ fn main() -> zbus::Result<()> {
             return Ok(());
         }
         Some("writer-test") => return run_writer_test(),
+        Some("removal-check") => return removal_check::run(),
+        Some("safe-removal-test") => return safe_removal_test::run(args.collect()),
         _ => {}
     }
 

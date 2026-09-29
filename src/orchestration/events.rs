@@ -17,6 +17,7 @@
 // whole operation on a worker thread of its own.
 
 use super::operation::{ConfirmationRequest, ConfirmedSummary};
+use crate::device::DeviceSnapshot;
 use crate::execution::core::{SelectionState, VerifyMode, VerifyTargetDiagnostics};
 use crate::execution::linux_access::{FdMetadata, OpenDeviceError};
 use crate::execution::write_job::VerifyProgress;
@@ -159,4 +160,11 @@ pub(crate) trait OperationObserver {
     fn pause_before_verify(&mut self) -> bool {
         true
     }
+
+    // Called once, right after the write started (`begin_write` succeeded),
+    // with the snapshot the write FD was bound to. Not a progress event:
+    // the worker keeps it as the anchor of a `RemovalTarget`, handed out
+    // only after the operation ended (Safe Removal). Everyone else ignores
+    // it.
+    fn write_started_on(&mut self, _bound: DeviceSnapshot) {}
 }

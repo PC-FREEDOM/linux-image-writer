@@ -18,7 +18,12 @@
 //! 7. answer the confirmation ([`ConfirmationDecision`]): the user's
 //!    explicit approval of the request as shown (`Approved`), or what the
 //!    user typed (`Submitted`, which the operation compares);
-//! 8. cancel through the worker at any time ([`CancelHandle`]).
+//! 8. cancel through the worker at any time ([`CancelHandle`]);
+//! 9. once `Finished` has arrived, [`WriteWorker::removal_target`] -- the
+//!    opaque [`RemovalTarget`] of the device the write started on, when the
+//!    outcome allows safe removal (take it before `join`);
+//! 10. when the user asks, [`request_safe_removal`] with it (blocking): only
+//!     [`SafeRemovalOutcome::Removed`] means the drive can be removed.
 //!
 //! Everything the sequence is built from -- device snapshots used for
 //! decisions, the Safety Engine, selection and confirmation tokens, the
@@ -92,6 +97,56 @@
 //! // A target reference comes only from the candidate list: the CLI's
 //! // block-path reference is not part of this API.
 //! let target = linux_usb_writer::TargetRef::from_block_path("/org/freedesktop/UDisks2/block_devices/sda");
+//! ```
+//!
+//! ```compile_fail,E0451
+//! // A removal target cannot be assembled: its anchor is private.
+//! fn forge() -> linux_usb_writer::RemovalTarget {
+//!     linux_usb_writer::RemovalTarget { anchor: todo!() }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0616
+//! // Nor read: the device snapshot it holds is not reachable.
+//! fn peek(target: &linux_usb_writer::RemovalTarget) {
+//!     let _ = &target.anchor;
+//! }
+//! ```
+//!
+//! ```compile_fail,E0624
+//! // Only the write operation builds one, from the snapshot its write FD was
+//! // bound to; that constructor is not part of this API.
+//! fn forge(snapshot: linux_usb_writer::report::DeviceSnapshot) -> linux_usb_writer::RemovalTarget {
+//!     linux_usb_writer::RemovalTarget::from_bound_snapshot(snapshot)
+//! }
+//! ```
+//!
+//! ```compile_fail,E0277
+//! // No device path turns into one.
+//! let target: linux_usb_writer::RemovalTarget = "/dev/sda".into();
+//! ```
+//!
+//! ```compile_fail,E0277
+//! // Nor does a target reference from the device list.
+//! fn forge(target: linux_usb_writer::TargetRef) -> linux_usb_writer::RemovalTarget {
+//!     target.into()
+//! }
+//! ```
+//!
+//! ```compile_fail,E0308
+//! // Safe removal takes a removal target, never a device-list reference.
+//! fn remove(target: &linux_usb_writer::TargetRef) {
+//!     let _ = linux_usb_writer::request_safe_removal(target);
+//! }
+//! ```
+//!
+//! ```compile_fail,E0432
+//! // What safe removal reads and plans stays inside the crate.
+//! use linux_usb_writer::report::RemovalFacts;
+//! ```
+//!
+//! ```compile_fail,E0432
+//! use linux_usb_writer::RemovalPlan;
 //! ```
 //!
 //! ```compile_fail,E0451
@@ -184,6 +239,9 @@ pub use orchestration::worker::{
     spawn_write_worker,
 };
 
+// ---- Safe Removal (the device a finished operation wrote to) ----
+pub use orchestration::removal::{RemovalTarget, SafeRemovalOutcome, request_safe_removal};
+
 // ---- Outcome (read-only data describing how an operation ended) ----
 pub use orchestration::outcome::{CancelledAt, OperationError, OperationOutcome, VerifyNotStarted};
 
@@ -210,5 +268,8 @@ pub mod report {
     pub use crate::orchestration::candidates::{SelectTargetError, TargetChange};
     pub use crate::orchestration::image::CompressedImageRejection;
     pub use crate::orchestration::operation::{ConfirmError, PrepareImageError, TargetNotReady};
+    pub use crate::orchestration::removal::{
+        RemovalActionError, RemovalStage, RemovalUnavailable, RemovalUnsupported,
+    };
     pub use crate::writer::{WriteError, WritePlan, WriteProgress};
 }
