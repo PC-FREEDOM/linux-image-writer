@@ -17,15 +17,18 @@ use gtk::{gio, glib};
 use linux_usb_writer::report::ImageSourceError;
 use linux_usb_writer::{
     CandidateListError, ConfirmationDecision, DeviceCandidate, ImageInfo, OperationOutcome,
-    TargetRef, VerifyAvailability, VerifyMode, WorkerConfirmationRequest, WorkerMessage,
-    WriteOperationRequest, WriteWorker, inspect_image, list_candidates, spawn_write_worker,
+    RemovalTarget, TargetRef, VerifyAvailability, VerifyMode, WorkerConfirmationRequest,
+    WorkerMessage, WriteOperationRequest, WriteWorker, inspect_image, list_candidates,
+    spawn_write_worker,
 };
 
 use crate::expansion::{self, Panel};
 use crate::model::{
-    self, CandidateLike, Eligibility, ImagePhase, SelectionOrigin, TargetChoice, VerifyState,
+    self, CandidateLike, Eligibility, ImagePhase, SelectionOrigin, TargetChoice, TargetReturn,
+    VerifyState,
 };
 use crate::operation::{self, CancelAction, Ending, STEPS, Tracker};
+use crate::result::{self, Leaving, RemovalPresentation, ResultAction};
 use crate::text;
 
 // How often the device list is read again (and whenever the window becomes
@@ -115,10 +118,16 @@ struct Operation {
     dialogs: Vec<adw::AlertDialog>,
     // How it ended, with the outcome for the technical details.
     ended: Option<(Ending, String)>,
+    // Safe Removal for the finished operation: the worker's own answer
+    // (`WriteWorker::removal_target`, read once `Finished` has arrived),
+    // `Unavailable` until then.
+    removal: RemovalPresentation<RemovalTarget>,
 }
 
 // The operation view's widgets, built once and updated from `Operation`.
 struct OperationUi {
+    // The result's icon (shown once the operation has ended).
+    icon: gtk::Image,
     title: gtk::Label,
     spinner: gtk::Spinner,
     status: gtk::Label,
@@ -131,7 +140,9 @@ struct OperationUi {
     message: gtk::Label,
     details: Vec<adw::ActionRow>,
     cancel: gtk::Button,
-    back: gtk::Button,
+    // The result's actions, one button each, shown as the result offers
+    // them.
+    actions: Vec<(ResultAction, gtk::Button)>,
 }
 
 struct Ui {
@@ -308,11 +319,10 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             .cancel
             .connect_clicked(move |_| cancel_pressed(&ui_ref));
     }
-    {
+    for (action, button) in &ui.op.actions {
         let ui_ref = ui.clone();
-        ui.op
-            .back
-            .connect_clicked(move |_| back_to_main(&ui_ref, None));
+        let action = *action;
+        button.connect_clicked(move |_| result_action(&ui_ref, action));
     }
     {
         // Closing the window would end the process and the write with it.
@@ -776,7 +786,7 @@ fn target_view(state: &State) -> TargetView {
             Discovery::Failed { detail } => Some(detail.clone()),
             _ => None,
         },
-        cleared: state.choice.cleared.map(text::clear_reason),
+        cleared: state.choice.cleared.and_then(text::clear_reason),
         available: Vec::new(),
         too_small: Vec::new(),
         protected: Vec::new(),
@@ -1253,6 +1263,7 @@ fn start_operation(ui: &Rc<Ui>) {
         image_name,
         dialogs: Vec::new(),
         ended: None,
+        removal: RemovalPresentation::Unavailable,
     });
     ui.views.set_visible_child_name(OPERATION_VIEW);
     render_operation(ui);
@@ -1311,6 +1322,13 @@ fn finish(ui: &Rc<Ui>, outcome: Option<OperationOutcome>) {
             return;
         };
         operation.tracker.finished();
+        // After `Finished` and before `join`, which consumes the worker.
+        operation.removal = RemovalPresentation::from_target(
+            operation
+                .worker
+                .as_ref()
+                .and_then(WriteWorker::removal_target),
+        );
         (
             operation.worker.take(),
             std::mem::take(&mut operation.dialogs),
@@ -1354,6 +1372,48 @@ fn finish(ui: &Rc<Ui>, outcome: Option<OperationOutcome>) {
             render_operation(&ui_ref);
         }
     });
+}
+
+// A result action. The finished operation's Safe Removal state is handed
+// to `result::leave`, which keeps it only while the result stays; leaving
+// for the main view applies what the action keeps (`MainReturn`), then
+// drops the whole operation (`back_to_main`).
+fn result_action(ui: &Rc<Ui>, action: ResultAction) {
+    if operation_running(ui) {
+        return;
+    }
+    let removal = match ui.operation.borrow_mut().as_mut() {
+        Some(operation) => {
+            std::mem::replace(&mut operation.removal, RemovalPresentation::Unavailable)
+        }
+        None => return,
+    };
+    match result::leave(removal, action) {
+        Leaving::Stay(removal) => {
+            if let Some(operation) = ui.operation.borrow_mut().as_mut() {
+                operation.removal = removal;
+            }
+        }
+        Leaving::Main(ret) => {
+            {
+                let mut state = ui.state.borrow_mut();
+                let choice = std::mem::take(&mut state.choice);
+                let (choice, verify) = model::return_to_main(ret, choice, state.verify);
+                state.choice = choice;
+                state.verify = verify;
+                if ret.target != TargetReturn::Keep {
+                    state.selected = None;
+                }
+                if !ret.keep_image {
+                    state.image = ImageState::Missing;
+                    // An inspection still running for an earlier image is
+                    // dropped.
+                    state.image_generation += 1;
+                }
+            }
+            back_to_main(ui, None);
+        }
+    }
 }
 
 // Leaves the operation view. The choices made before "Write" are still
@@ -1611,6 +1671,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             .css_classes(classes.to_vec())
             .build()
     };
+    let icon = gtk::Image::builder().pixel_size(48).visible(false).build();
     let title = centered(&["title-2"]);
     let spinner = gtk::Spinner::builder().spinning(true).build();
     spinner.update_property(&[gtk::accessible::Property::Label("処理中")]);
@@ -1676,7 +1737,8 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .margin_end(12)
         .build();
     for widget in [
-        title.upcast_ref::<gtk::Widget>(),
+        icon.upcast_ref::<gtk::Widget>(),
+        title.upcast_ref(),
         status_line.upcast_ref(),
         note.upcast_ref(),
         flow.upcast_ref(),
@@ -1704,12 +1766,6 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .halign(gtk::Align::Center)
         .css_classes(["pill"])
         .build();
-    let back = gtk::Button::builder()
-        .label("メイン画面へ戻る")
-        .halign(gtk::Align::Center)
-        .css_classes(["pill", "suggested-action"])
-        .visible(false)
-        .build();
     let bottom = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -1717,7 +1773,28 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .margin_bottom(8)
         .build();
     bottom.append(&cancel);
-    bottom.append(&back);
+    // Safe Removal's button is added together with the request it starts
+    // (off the GTK thread); until then the result offers it in its model
+    // only, and no button that would do nothing is shown.
+    let actions = [
+        ResultAction::WriteAnother,
+        ResultAction::WriteAgain,
+        ResultAction::Retry,
+        ResultAction::BackToMain,
+        ResultAction::Done,
+    ]
+    .into_iter()
+    .map(|action| {
+        let button = gtk::Button::builder()
+            .label(text::result_action(action))
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .visible(false)
+            .build();
+        bottom.append(&button);
+        (action, button)
+    })
+    .collect();
 
     let page = adw::ToolbarView::new();
     page.add_top_bar(&adw::HeaderBar::new());
@@ -1727,6 +1804,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
 
     (
         OperationUi {
+            icon,
             title,
             spinner,
             status,
@@ -1739,7 +1817,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             message,
             details,
             cancel,
-            back,
+            actions,
         },
         page,
     )
@@ -1755,24 +1833,33 @@ fn render_operation(ui: &Ui) {
 
     op.image.set_text(&operation.image_name);
     op.target.set_text(&match &tracker.target {
-        Some(target) => format!(
-            "{} · {}",
-            text::device_name(&target.vendor, &target.model),
-            target.device
-        ),
+        Some(target) => text::target_summary(target),
         None => "書き込み先を確認しています…".to_string(),
     });
 
-    let marks = match &operation.ended {
-        Some((ending, _)) => ending.marks(tracker.verify_mode),
-        None => tracker.marks(),
-    };
-    for ((row, icon), mark) in op.steps.iter().zip(marks) {
-        row.set_subtitle(text::mark_label(mark));
-        icon.set_icon_name(Some(text::mark_icon(mark)));
+    // The result view, once the outcome is joined (a declined confirmation
+    // has none: the window has gone back to the main view).
+    let view = operation
+        .ended
+        .as_ref()
+        .and_then(|(ending, _)| result::view(*ending, tracker.verify_mode, &operation.removal));
+
+    match &view {
+        None => {
+            for ((row, icon), mark) in op.steps.iter().zip(tracker.marks()) {
+                row.set_subtitle(text::mark_label(mark));
+                icon.set_icon_name(Some(text::mark_icon(mark)));
+            }
+        }
+        Some(view) => {
+            for ((row, icon), line) in op.steps.iter().zip(view.steps) {
+                row.set_subtitle(text::result_step(view.case, line));
+                icon.set_icon_name(Some(text::mark_icon(line.mark)));
+            }
+        }
     }
 
-    match &operation.ended {
+    match &view {
         None => {
             let (status, note) = text::activity(tracker);
             op.title.set_text(text::headline(tracker.step()));
@@ -1801,26 +1888,42 @@ fn render_operation(ui: &Ui) {
                 }
             }
             op.message.set_visible(false);
+            op.icon.set_visible(false);
             let action = tracker.cancel_action();
             op.cancel.set_visible(true);
             op.cancel.set_sensitive(action != CancelAction::Unavailable);
-            op.back.set_visible(false);
+            for (_, button) in &op.actions {
+                button.set_visible(false);
+            }
         }
-        Some((ending, _)) => {
-            op.title.set_text(text::ending_title(*ending));
+        Some(view) => {
+            op.icon.set_icon_name(Some(text::result_icon(view.kind)));
+            op.icon.set_visible(true);
+            op.title.set_text(text::result_title(view.case));
             op.status.set_visible(false);
             op.spinner.set_visible(false);
             op.note.set_visible(false);
             op.progress.set_visible(false);
             op.amount.set_visible(false);
-            op.message.set_text(&text::ending_message(*ending));
+            op.message.set_text(&text::result_message(view.case));
             op.message.set_visible(true);
             op.cancel.set_visible(false);
-            op.back.set_visible(true);
+            // The first action shown is the suggested one.
+            let mut first = true;
+            for (action, button) in &op.actions {
+                let offered = view.actions.contains(action);
+                button.set_visible(offered);
+                if offered && first {
+                    button.add_css_class("suggested-action");
+                    first = false;
+                } else {
+                    button.remove_css_class("suggested-action");
+                }
+            }
         }
     }
     // Before the outcome is joined and shown, neither button acts.
-    if operation.ended.is_none() && tracker.activity == operation::Activity::Finished {
+    if view.is_none() && tracker.activity == operation::Activity::Finished {
         op.cancel.set_sensitive(false);
     }
 

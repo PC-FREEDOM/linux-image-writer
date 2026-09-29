@@ -6,12 +6,13 @@ use std::io;
 
 use linux_usb_writer::report::{CompressionFormat, ImageSourceError};
 use linux_usb_writer::{
-    ImageAccess, OpenPurpose, RiskLevel, RiskReason, VerifyMode, VerifyUnavailableReason,
-    WorkerConfirmationRequest,
+    DeviceDisplay, ImageAccess, OpenPurpose, RiskLevel, RiskReason, VerifyMode,
+    VerifyUnavailableReason, WorkerConfirmationRequest,
 };
 
 use crate::model::{ClearReason, VerifyNotice, WriteBlocker};
-use crate::operation::{Activity, Ending, Mark, Reason, Step, Tracker};
+use crate::operation::{Activity, Mark, Reason, Step, Tracker};
+use crate::result::{ResultAction, ResultCase, ResultKind, StepLine};
 
 // ---- Sizes ----
 
@@ -183,17 +184,20 @@ pub fn candidate_list_error_message() -> &'static str {
     "デバイスの一覧を取得できませんでした"
 }
 
-pub fn clear_reason(reason: ClearReason) -> &'static str {
+// Why the selection was cleared, when it needs saying. Choosing another
+// drive was the user's own request: the empty selection says it all.
+pub fn clear_reason(reason: ClearReason) -> Option<&'static str> {
     match reason {
-        ClearReason::Disappeared => {
-            "選択していた USB ドライブが見つからなくなりました。書き込み先を選び直してください。"
-        }
+        ClearReason::Disappeared => Some(
+            "選択していた USB ドライブが見つからなくなりました。書き込み先を選び直してください。",
+        ),
         ClearReason::NoLongerSelectable => {
-            "選択していた USB ドライブは現在選択できません。書き込み先を選び直してください。"
+            Some("選択していた USB ドライブは現在選択できません。書き込み先を選び直してください。")
         }
-        ClearReason::TooSmall => {
-            "選択していた USB ドライブはこのイメージには容量が足りません。書き込み先を選び直してください。"
-        }
+        ClearReason::TooSmall => Some(
+            "選択していた USB ドライブはこのイメージには容量が足りません。書き込み先を選び直してください。",
+        ),
+        ClearReason::ChooseAnother => None,
     }
 }
 
@@ -357,54 +361,135 @@ pub fn activity(tracker: &Tracker) -> (&'static str, &'static str) {
     }
 }
 
-pub fn ending_title(ending: Ending) -> &'static str {
-    match ending {
-        Ending::Verified(_) => "書き込み処理が完了しました",
-        Ending::WrittenWithoutVerify => "書き込みが完了しました",
-        Ending::CancelledBeforeWrite | Ending::CancelledDuringWrite { .. } => {
+// ---- The result ----
+
+pub fn result_title(case: ResultCase) -> &'static str {
+    match case {
+        ResultCase::Verified(_) => "完了しました",
+        ResultCase::WrittenWithoutVerify => "書き込みが完了しました",
+        ResultCase::VerifyCancelled => "書き込みは完了しています",
+        ResultCase::VerifyMismatch => "検証で問題が見つかりました",
+        ResultCase::VerifyNotCompleted(_) => "検証を完了できませんでした",
+        ResultCase::WriteFailed { .. } => "書き込みを完了できませんでした",
+        ResultCase::WriteCancelled { .. } | ResultCase::CancelledBeforeWrite => {
             "書き込みを中止しました"
         }
-        Ending::CancelledDuringVerify => "検証を中止しました",
-        Ending::NotStarted { .. } => "書き込みを開始できませんでした",
-        Ending::WriteFailed { .. } | Ending::VerifyFailed { .. } | Ending::Lost => {
-            "書き込み処理を完了できませんでした"
-        }
+        ResultCase::NotStarted(_) => "書き込みを開始できませんでした",
+        ResultCase::Lost => "書き込み処理を完了できませんでした",
     }
 }
 
-pub fn ending_message(ending: Ending) -> String {
-    const INCOMPLETE: &str = "USB ドライブには不完全なイメージが残っている可能性があります。";
+pub fn result_icon(kind: ResultKind) -> &'static str {
+    match kind {
+        ResultKind::Success => "emblem-ok-symbolic",
+        ResultKind::WrittenNotVerified => "dialog-information-symbolic",
+        ResultKind::Cancelled => "process-stop-symbolic",
+        ResultKind::Failed => "dialog-warning-symbolic",
+    }
+}
+
+// What one step says on the result view: the step's own words where the
+// case says more than its mark.
+pub fn result_step(case: ResultCase, line: StepLine) -> &'static str {
+    match (line.step, line.mark) {
+        (Step::Write, Mark::Done) => "書き込み完了",
+        (Step::Write, _) => match case {
+            ResultCase::WriteFailed { .. } => "書き込みを完了できませんでした",
+            ResultCase::WriteCancelled { .. } => "中止（書き込みは完了していません）",
+            _ => mark_label(line.mark),
+        },
+        (Step::Verify, _) => match case {
+            ResultCase::Verified(mode) => match mode {
+                VerifyMode::Full => "完全検証完了",
+                _ => "クイック検証完了",
+            },
+            ResultCase::WrittenWithoutVerify => "検証なし",
+            ResultCase::VerifyCancelled => "検証は完了していません",
+            ResultCase::VerifyMismatch => "読み戻したデータが一致しませんでした",
+            ResultCase::VerifyNotCompleted(reason) => {
+                if verify_ran(reason) {
+                    "検証中に問題が発生しました"
+                } else {
+                    "検証を開始できませんでした"
+                }
+            }
+            _ => mark_label(line.mark),
+        },
+        (Step::Prepare, _) => mark_label(line.mark),
+    }
+}
+
+// Whether Verify had started reading when it failed (otherwise it could
+// not start).
+fn verify_ran(reason: Reason) -> bool {
+    matches!(
+        reason,
+        Reason::VerifyReadError
+            | Reason::VerifyLengthMismatch
+            | Reason::QuickVerifyUnsupported
+            | Reason::ImageChanged
+    )
+}
+
+// What the result means for the USB drive now, and what to do. Built only
+// from the case's typed reasons, never from an error's own text.
+pub fn result_message(case: ResultCase) -> String {
+    const INCOMPLETE: &str = "USB ドライブには不完全なイメージが残っている可能性があります。起動用の USB ドライブとして使用しないでください。";
     const NOTHING_WRITTEN: &str = "USB ドライブには何も書き込んでいません。";
-    match ending {
-        Ending::Verified(mode) => format!("{}まで完了しました。", verify_title(mode)),
-        Ending::WrittenWithoutVerify => "書き込み後の読み戻し確認は行っていません。".to_string(),
-        Ending::CancelledBeforeWrite => NOTHING_WRITTEN.to_string(),
-        Ending::CancelledDuringWrite { target_modified } => if target_modified {
+    match case {
+        ResultCase::Verified(_) => "USB ドライブを使用できます。".to_string(),
+        ResultCase::WrittenWithoutVerify => "書き込み後の検証は行っていません。".to_string(),
+        ResultCase::VerifyCancelled => "書き込み後の検証は完了していません。".to_string(),
+        ResultCase::VerifyMismatch => "書き込みは完了しましたが、読み戻したデータがイメージと一致しませんでした。正しく書き込まれていない可能性があるため、この USB ドライブを起動用として使用することはおすすめしません。".to_string(),
+        ResultCase::VerifyNotCompleted(reason) => format!(
+            "書き込みは完了していますが、検証を完了できませんでした。\n{}",
+            reason_text(reason)
+        ),
+        ResultCase::WriteFailed {
+            reason,
+            target_modified,
+        } => format!(
+            "{}\n{}",
+            reason_text(reason),
+            if target_modified {
+                INCOMPLETE
+            } else {
+                NOTHING_WRITTEN
+            }
+        ),
+        ResultCase::WriteCancelled { target_modified } => if target_modified {
             INCOMPLETE
         } else {
             NOTHING_WRITTEN
         }
         .to_string(),
-        Ending::CancelledDuringVerify => {
-            "書き込みは完了しましたが、書き込んだデータの確認は完了していません。".to_string()
+        ResultCase::CancelledBeforeWrite => {
+            "USB ドライブへの書き込みは開始されていません。".to_string()
         }
-        Ending::NotStarted { reason, .. } => format!("{}\n{NOTHING_WRITTEN}", reason_text(reason)),
-        Ending::WriteFailed {
-            reason,
-            target_modified,
-        } => {
-            if target_modified {
-                format!("{}\n{INCOMPLETE}", reason_text(reason))
-            } else {
-                format!("{}\n{NOTHING_WRITTEN}", reason_text(reason))
-            }
-        }
-        Ending::VerifyFailed { reason } => format!(
-            "書き込みは完了しましたが、検証を完了できませんでした。\n{}",
-            reason_text(reason)
-        ),
-        Ending::Lost => format!("内部エラーで処理が終了しました。\n{INCOMPLETE}"),
+        ResultCase::NotStarted(reason) => format!("{}\n{NOTHING_WRITTEN}", reason_text(reason)),
+        ResultCase::Lost => format!("内部エラーで処理が終了しました。\n{INCOMPLETE}"),
     }
+}
+
+pub fn result_action(action: ResultAction) -> &'static str {
+    match action {
+        ResultAction::SafeRemoval => "安全に取り外す",
+        ResultAction::WriteAnother => "別の USB に書き込む",
+        ResultAction::WriteAgain => "もう一度書き込む",
+        ResultAction::Retry => "やり直す",
+        ResultAction::BackToMain => "メイン画面に戻る",
+        ResultAction::Done => "完了",
+    }
+}
+
+// The target as the operation and result views name it: its name and
+// device node (never its serial number or object path).
+pub fn target_summary(target: &DeviceDisplay) -> String {
+    format!(
+        "{} · {}",
+        device_name(&target.vendor, &target.model),
+        target.device
+    )
 }
 
 pub fn reason_text(reason: Reason) -> &'static str {
@@ -711,37 +796,238 @@ mod tests {
         );
     }
 
+    fn every_case() -> Vec<ResultCase> {
+        vec![
+            ResultCase::Verified(VerifyMode::Quick),
+            ResultCase::Verified(VerifyMode::Full),
+            ResultCase::WrittenWithoutVerify,
+            ResultCase::VerifyCancelled,
+            ResultCase::VerifyMismatch,
+            ResultCase::VerifyNotCompleted(Reason::VerifyReadError),
+            ResultCase::VerifyNotCompleted(Reason::VerifyTargetChanged),
+            ResultCase::WriteFailed {
+                reason: Reason::WriteError,
+                target_modified: true,
+            },
+            ResultCase::WriteFailed {
+                reason: Reason::SyncError,
+                target_modified: false,
+            },
+            ResultCase::WriteCancelled {
+                target_modified: true,
+            },
+            ResultCase::WriteCancelled {
+                target_modified: false,
+            },
+            ResultCase::CancelledBeforeWrite,
+            ResultCase::NotStarted(Reason::AccessDenied),
+            ResultCase::Lost,
+        ]
+    }
+
+    // Everything the result view says for a case, in one string.
+    fn everything_said(case: ResultCase) -> String {
+        let mut said = format!("{}\n{}", result_title(case), result_message(case));
+        for (step, mark) in [Step::Prepare, Step::Write, Step::Verify]
+            .into_iter()
+            .flat_map(|step| {
+                [
+                    Mark::Waiting,
+                    Mark::Done,
+                    Mark::Skipped,
+                    Mark::Cancelled,
+                    Mark::Failed,
+                ]
+                .map(|mark| (step, mark))
+            })
+        {
+            said.push('\n');
+            said.push_str(result_step(case, StepLine { step, mark }));
+        }
+        said
+    }
+
+    fn line(step: Step, mark: Mark) -> StepLine {
+        StepLine { step, mark }
+    }
+
     #[test]
-    fn endings_read_as_expected() {
+    fn success_says_what_was_verified() {
+        let quick = ResultCase::Verified(VerifyMode::Quick);
+        assert_eq!(result_title(quick), "完了しました");
         assert_eq!(
-            ending_message(Ending::Verified(VerifyMode::Quick)),
-            "クイック検証まで完了しました。"
+            result_step(quick, line(Step::Write, Mark::Done)),
+            "書き込み完了"
         );
         assert_eq!(
-            ending_message(Ending::WrittenWithoutVerify),
-            "書き込み後の読み戻し確認は行っていません。"
+            result_step(quick, line(Step::Verify, Mark::Done)),
+            "クイック検証完了"
         );
-        assert!(
-            ending_message(Ending::CancelledDuringWrite {
-                target_modified: true
-            })
-            .contains("不完全")
+        assert_eq!(result_message(quick), "USB ドライブを使用できます。");
+        let full = ResultCase::Verified(VerifyMode::Full);
+        assert_eq!(
+            result_step(full, line(Step::Verify, Mark::Done)),
+            "完全検証完了"
         );
-        // A cancelled Verify never warns about an incomplete image.
-        assert!(!ending_message(Ending::CancelledDuringVerify).contains("不完全"));
-        assert!(
-            ending_message(Ending::VerifyFailed {
-                reason: Reason::VerifyMismatch
-            })
-            .contains("一致しませんでした")
+    }
+
+    #[test]
+    fn verify_none_never_claims_a_verified_or_usable_drive() {
+        let case = ResultCase::WrittenWithoutVerify;
+        assert_eq!(result_title(case), "書き込みが完了しました");
+        assert_eq!(
+            result_step(case, line(Step::Verify, Mark::Skipped)),
+            "検証なし"
         );
-        assert!(
-            ending_message(Ending::NotStarted {
-                at: Step::Prepare,
-                reason: Reason::TargetNotFound
-            })
-            .ends_with("何も書き込んでいません。")
+        assert_eq!(result_message(case), "書き込み後の検証は行っていません。");
+        let said = everything_said(case);
+        for forbidden in ["検証済み", "使用できます", "正常", "安全"] {
+            assert!(!said.contains(forbidden), "{forbidden}: {said}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_verify_says_the_write_is_complete() {
+        let case = ResultCase::VerifyCancelled;
+        assert_eq!(result_title(case), "書き込みは完了しています");
+        assert_eq!(
+            result_step(case, line(Step::Verify, Mark::Cancelled)),
+            "検証は完了していません"
         );
+        assert_eq!(result_message(case), "書き込み後の検証は完了していません。");
+        // Not worded as an error: the lines it actually shows.
+        let said = [
+            result_title(case).to_string(),
+            result_message(case),
+            result_step(case, line(Step::Write, Mark::Done)).to_string(),
+            result_step(case, line(Step::Verify, Mark::Cancelled)).to_string(),
+        ]
+        .join("\n");
+        for error_like in ["失敗", "エラー", "問題"] {
+            assert!(!said.contains(error_like), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_mismatch_is_not_called_a_failed_write() {
+        let case = ResultCase::VerifyMismatch;
+        assert_eq!(result_title(case), "検証で問題が見つかりました");
+        assert_eq!(
+            result_step(case, line(Step::Verify, Mark::Failed)),
+            "読み戻したデータが一致しませんでした"
+        );
+        assert_eq!(
+            result_step(case, line(Step::Write, Mark::Done)),
+            "書き込み完了"
+        );
+        let message = result_message(case);
+        assert!(message.contains("おすすめしません"), "{message}");
+        let said = everything_said(case);
+        assert!(!said.contains("書き込み失敗"), "{said}");
+        assert!(!said.contains("書き込みを完了できませんでした"), "{said}");
+    }
+
+    #[test]
+    fn a_verify_error_is_not_a_mismatch_and_the_write_is_complete() {
+        let during = ResultCase::VerifyNotCompleted(Reason::VerifyReadError);
+        assert_eq!(result_title(during), "検証を完了できませんでした");
+        assert_eq!(
+            result_step(during, line(Step::Verify, Mark::Failed)),
+            "検証中に問題が発生しました"
+        );
+        assert!(result_message(during).starts_with("書き込みは完了しています"));
+        assert!(!everything_said(during).contains("一致しませんでした"));
+        // One that never started reading is not said to have run.
+        let before = ResultCase::VerifyNotCompleted(Reason::VerifyOpenFailed);
+        assert_eq!(
+            result_step(before, line(Step::Verify, Mark::Failed)),
+            "検証を開始できませんでした"
+        );
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_write_warns_about_an_incomplete_image() {
+        let failed = ResultCase::WriteFailed {
+            reason: Reason::WriteError,
+            target_modified: true,
+        };
+        assert_eq!(result_title(failed), "書き込みを完了できませんでした");
+        assert!(result_message(failed).contains("不完全なイメージ"));
+        assert!(result_message(failed).contains("起動用の USB ドライブとして使用しないでください"));
+
+        let cancelled = ResultCase::WriteCancelled {
+            target_modified: true,
+        };
+        assert_eq!(result_title(cancelled), "書き込みを中止しました");
+        assert!(result_message(cancelled).contains("不完全なイメージ"));
+        assert!(!everything_said(cancelled).contains("エラー"));
+    }
+
+    #[test]
+    fn a_cancellation_before_the_write_says_it_never_started() {
+        let case = ResultCase::CancelledBeforeWrite;
+        assert_eq!(result_title(case), "書き込みを中止しました");
+        assert_eq!(
+            result_message(case),
+            "USB ドライブへの書き込みは開始されていません。"
+        );
+    }
+
+    // No result says the drive can be removed (only a completed Safe
+    // Removal may), nor that nothing was changed on it by removal.
+    #[test]
+    fn no_result_speaks_for_safe_removal() {
+        for case in every_case() {
+            let said = everything_said(case);
+            for forbidden in ["安全", "取り外", "電源", "何も変更"] {
+                assert!(!said.contains(forbidden), "{case:?}: {said}");
+            }
+        }
+        assert_eq!(result_action(ResultAction::SafeRemoval), "安全に取り外す");
+    }
+
+    // Result texts are built from typed reasons only: no type names, no
+    // object paths, no serial numbers.
+    #[test]
+    fn results_show_no_raw_errors_or_identifiers() {
+        for case in every_case() {
+            let said = everything_said(case);
+            for raw in ["Error", "/org/freedesktop", "UDisks2.", "Serial", "{", "::"] {
+                assert!(!said.contains(raw), "{case:?}: {said}");
+            }
+        }
+        let target = DeviceDisplay {
+            device: "/dev/sdq".to_string(),
+            vendor: "General".to_string(),
+            model: "UDisk".to_string(),
+            serial: "SERIAL-123".to_string(),
+            size: 8_000_000_000,
+            connection_bus: "usb".to_string(),
+            removable: true,
+            read_only: false,
+            media_available: true,
+            mount_points: Vec::new(),
+        };
+        assert_eq!(target_summary(&target), "General UDisk · /dev/sdq");
+    }
+
+    #[test]
+    fn every_result_kind_has_its_own_icon() {
+        let kinds = [
+            ResultKind::Success,
+            ResultKind::WrittenNotVerified,
+            ResultKind::Cancelled,
+            ResultKind::Failed,
+        ];
+        for a in kinds {
+            for b in kinds {
+                assert_eq!(a == b, result_icon(a) == result_icon(b));
+            }
+        }
+    }
+
+    #[test]
+    fn marks_are_words() {
         // Marks are words, never only an icon.
         for mark in [
             Mark::Waiting,

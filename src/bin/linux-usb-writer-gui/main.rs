@@ -13,11 +13,16 @@
 // shows its messages and returns the user's answers (`Approved` or
 // `Cancelled`, and cancellation). Nothing here opens a device.
 //
+// The result view (Phase 3B-1b-3a) reads the worker's outcome and whether
+// it handed out a Safe Removal target (`WriteWorker::removal_target`);
+// nothing here unmounts or powers off a device.
+//
 //   linux-usb-writer-gui [image]   (an image given here is inspected at start)
 
 mod expansion;
 mod model;
 mod operation;
+mod result;
 mod text;
 mod window;
 

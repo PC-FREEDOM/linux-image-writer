@@ -111,6 +111,10 @@ pub enum ClearReason {
     NoLongerSelectable,
     // Still selectable, but the (new) image is known not to fit.
     TooSmall,
+    // The user asked to write the same image to another drive (a result's
+    // "write to another USB"): the drive just written is not kept, and none
+    // is selected automatically -- it could be that same drive again.
+    ChooseAnother,
 }
 
 // The target side of the GUI state.
@@ -302,6 +306,61 @@ impl VerifyState {
             notice: None,
         }
     }
+
+    // The image was let go: only the user's preference is kept. The mode in
+    // effect and the notice belonged to that image; the next image starts
+    // from the preference (`for_image`).
+    pub fn without_image(self) -> Self {
+        VerifyState {
+            preferred: self.preferred,
+            ..VerifyState::initial()
+        }
+    }
+}
+
+// ---- Leaving a result ----
+
+// What the main view keeps when the user leaves a finished operation's
+// result. The Verify preference is always kept. Nothing of the operation
+// itself is kept (the window drops it, Safe Removal's target with it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainReturn {
+    pub keep_image: bool,
+    pub target: TargetReturn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetReturn {
+    // The selection stays as it is; the next refresh applies the usual
+    // rules to it (`reconcile`: same device and instance, still selectable,
+    // still large enough).
+    Keep,
+    // Let go, and none selected automatically (`ClearReason::ChooseAnother`).
+    ChooseAnother,
+    // Back to the start: nothing selected, automatic selection as at start.
+    Reset,
+}
+
+// The target choice and Verify state after leaving a result.
+pub fn return_to_main<H>(
+    ret: MainReturn,
+    choice: TargetChoice<H>,
+    verify: VerifyState,
+) -> (TargetChoice<H>, VerifyState) {
+    let choice = match ret.target {
+        TargetReturn::Keep => choice,
+        TargetReturn::ChooseAnother => TargetChoice {
+            selection: None,
+            cleared: Some(ClearReason::ChooseAnother),
+        },
+        TargetReturn::Reset => TargetChoice::default(),
+    };
+    let verify = if ret.keep_image {
+        verify
+    } else {
+        verify.without_image()
+    };
+    (choice, verify)
 }
 
 // ---- Capacity (compatibility, not Safety) ----
@@ -715,5 +774,131 @@ mod tests {
             write_readiness(ImagePhase::Missing, true, None, false),
             Err(WriteBlocker::NoImage)
         );
+    }
+
+    // ---- Leaving a result ----
+
+    fn kept(target: TargetReturn) -> MainReturn {
+        MainReturn {
+            keep_image: true,
+            target,
+        }
+    }
+
+    fn done() -> MainReturn {
+        MainReturn {
+            keep_image: false,
+            target: TargetReturn::Reset,
+        }
+    }
+
+    #[test]
+    fn keeping_the_target_keeps_the_selection_and_the_verify_state() {
+        let held = select_manually(&usb("/dev/sda", 1), RAW_2GB).unwrap();
+        let verify = after(VerifyState::chosen(VerifyMode::Full), &raw());
+        let (choice, after_return) = return_to_main(kept(TargetReturn::Keep), held, verify);
+        assert_eq!(
+            choice
+                .selection
+                .as_ref()
+                .map(|selection| selection.held.path),
+            Some("/dev/sda")
+        );
+        assert_eq!(choice.cleared, None);
+        assert_eq!(after_return, verify);
+    }
+
+    // A kept target is only shown as chosen: the next refresh judges it as
+    // any selection (same device and instance, still selectable), and a
+    // re-plugged or changed drive is not kept.
+    #[test]
+    fn a_kept_target_still_goes_through_the_refresh_rules() {
+        let held = select_manually(&usb("/dev/sda", 1), RAW_2GB).unwrap();
+        let (choice, _) = return_to_main(kept(TargetReturn::Keep), held, VerifyState::initial());
+        let mut replugged = usb("/dev/sda", 1);
+        replugged.instance = 2;
+        let refreshed = reconcile(choice, &[replugged], RAW_2GB);
+        assert_eq!(path(&refreshed), None);
+        assert_eq!(refreshed.choice.cleared, Some(ClearReason::Disappeared));
+
+        let held = select_manually(&usb("/dev/sda", 1), RAW_2GB).unwrap();
+        let (choice, _) = return_to_main(kept(TargetReturn::Keep), held, VerifyState::initial());
+        let mut mounted = usb("/dev/sda", 1);
+        mounted.selectable = false;
+        let refreshed = reconcile(choice, &[mounted], RAW_2GB);
+        assert_eq!(path(&refreshed), None);
+    }
+
+    // "Write to another USB": the drive just written is let go and not
+    // selected again automatically -- not even when it is the only one
+    // listed -- until the user picks one. The image's Verify state stays.
+    #[test]
+    fn another_usb_lets_the_target_go_and_keeps_the_image_and_verify() {
+        let held = select_manually(&usb("/dev/sda", 1), RAW_2GB).unwrap();
+        let verify = after(VerifyState::chosen(VerifyMode::Full), &raw());
+        let (choice, after_return) =
+            return_to_main(kept(TargetReturn::ChooseAnother), held, verify);
+        assert!(choice.selection.is_none());
+        assert_eq!(choice.cleared, Some(ClearReason::ChooseAnother));
+        assert_eq!(after_return, verify);
+        // Still valid for the kept image.
+        assert_eq!(
+            raw().verify_availability(after_return.mode),
+            VerifyAvailability::Available
+        );
+
+        let same_drive = [usb("/dev/sda", 1)];
+        let refreshed = reconcile(choice, &same_drive, RAW_2GB);
+        assert_eq!(path(&refreshed), None);
+        let picked = select_manually(&usb("/dev/sdb", 2), RAW_2GB).unwrap();
+        let refreshed = reconcile(picked, &[usb("/dev/sdb", 2)], RAW_2GB);
+        assert_eq!(path(&refreshed), Some("/dev/sdb"));
+    }
+
+    // "Done": nothing selected and automatic selection as at start; only
+    // the Verify preference is kept -- not the mode or notice the previous
+    // image led to.
+    #[test]
+    fn done_starts_over_keeping_only_the_verify_preference() {
+        let held = select_manually(&usb("/dev/sda", 1), RAW_2GB).unwrap();
+        let verify = after(VerifyState::chosen(VerifyMode::Full), &raw());
+        let (choice, after_return) = return_to_main(done(), held, verify);
+        assert!(choice.selection.is_none());
+        assert_eq!(choice.cleared, None);
+        assert_eq!(after_return.preferred, Some(VerifyMode::Full));
+        assert_eq!(after_return.notice, None);
+        assert_eq!(
+            after_return,
+            VerifyState {
+                preferred: Some(VerifyMode::Full),
+                ..VerifyState::initial()
+            }
+        );
+        // The next image applies the preference afresh.
+        assert_eq!(after(after_return, &raw()).mode, VerifyMode::Full);
+
+        // A fallback notice belonged to the previous image: gone.
+        let fell_back = after(VerifyState::chosen(VerifyMode::Quick), &gzip());
+        assert!(fell_back.notice.is_some());
+        let (_, after_return) = return_to_main(done(), TargetChoice::<Entry>::default(), fell_back);
+        assert_eq!(after_return.notice, None);
+        assert_eq!(after_return.preferred, fell_back.preferred);
+        let next = after(after_return, &raw());
+        assert_eq!(next.notice, None);
+        assert_eq!(next.mode, fell_back.preferred.unwrap());
+
+        // Without a preference, the recommended mode applies again.
+        let (_, after_return) = return_to_main(
+            done(),
+            TargetChoice::<Entry>::default(),
+            after(VerifyState::initial(), &gzip()),
+        );
+        assert_eq!(after_return, VerifyState::initial());
+        assert_eq!(after(after_return, &raw()).mode, VerifyMode::Quick);
+
+        // With an image again, the only available drive is selected as at
+        // start.
+        let started = reconcile(choice, &[usb("/dev/sdb", 2)], RAW_2GB);
+        assert_eq!(path(&started), Some("/dev/sdb"));
     }
 }

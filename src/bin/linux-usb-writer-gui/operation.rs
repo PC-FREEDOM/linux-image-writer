@@ -349,8 +349,12 @@ pub enum Ending {
     Verified(VerifyMode),
     // Written and synced; Verify was not requested.
     WrittenWithoutVerify,
-    // Stopped before anything was opened on the target.
+    // Stopped before anything was opened on the target (during Preflight,
+    // or before the final confirmation was shown): shown as a result.
     CancelledBeforeWrite,
+    // The user declined the final confirmation: nothing was opened on the
+    // target, and the window goes straight back to the main view.
+    ConfirmationDeclined,
     // Stopped during the write (sync included).
     CancelledDuringWrite {
         target_modified: bool,
@@ -418,9 +422,10 @@ pub fn ending(outcome: &OperationOutcome) -> Ending {
             }
         }
         OperationOutcome::Cancelled(at) => match at {
-            CancelledAt::Preflight
-            | CancelledAt::BeforeConfirmation
-            | CancelledAt::Confirmation => Ending::CancelledBeforeWrite,
+            CancelledAt::Preflight | CancelledAt::BeforeConfirmation => {
+                Ending::CancelledBeforeWrite
+            }
+            CancelledAt::Confirmation => Ending::ConfirmationDeclined,
             CancelledAt::Write { cancelled, .. } => Ending::CancelledDuringWrite {
                 target_modified: cancelled.target_may_be_modified,
             },
@@ -556,7 +561,9 @@ impl Ending {
         match self {
             Ending::Verified(_) => [Mark::Done, Mark::Done, Mark::Done],
             Ending::WrittenWithoutVerify => [Mark::Done, Mark::Done, Mark::Skipped],
-            Ending::CancelledBeforeWrite => [Mark::Cancelled, Mark::Waiting, verify_waiting],
+            Ending::CancelledBeforeWrite | Ending::ConfirmationDeclined => {
+                [Mark::Cancelled, Mark::Waiting, verify_waiting]
+            }
             Ending::CancelledDuringWrite { .. } => [Mark::Done, Mark::Cancelled, verify_waiting],
             Ending::CancelledDuringVerify => [Mark::Done, Mark::Done, Mark::Cancelled],
             Ending::NotStarted {
@@ -570,10 +577,10 @@ impl Ending {
         }
     }
 
-    // Stopped before anything was written: the window goes straight back
-    // to the main view.
+    // The final confirmation was declined: the window goes straight back
+    // to the main view, with the choices made before "Write" (no result).
     pub fn returns_to_main(self) -> bool {
-        self == Ending::CancelledBeforeWrite
+        self == Ending::ConfirmationDeclined
     }
 }
 
@@ -879,16 +886,19 @@ mod tests {
         );
     }
 
+    // Only a declined final confirmation goes straight back to the main
+    // view; a cancellation during Preflight or before the confirmation was
+    // shown ends with a result (nothing was opened on the target either way).
     #[test]
-    fn cancellations_before_the_write_return_to_the_main_view() {
-        for at in [
-            CancelledAt::Preflight,
-            CancelledAt::BeforeConfirmation,
-            CancelledAt::Confirmation,
-        ] {
-            let ending = ending(&OperationOutcome::Cancelled(at));
+    fn only_a_declined_confirmation_returns_to_the_main_view() {
+        let ending_for = |at| ending(&OperationOutcome::Cancelled(at));
+        let declined = ending_for(CancelledAt::Confirmation);
+        assert_eq!(declined, Ending::ConfirmationDeclined);
+        assert!(declined.returns_to_main());
+        for at in [CancelledAt::Preflight, CancelledAt::BeforeConfirmation] {
+            let ending = ending_for(at);
             assert_eq!(ending, Ending::CancelledBeforeWrite);
-            assert!(ending.returns_to_main());
+            assert!(!ending.returns_to_main());
         }
     }
 
