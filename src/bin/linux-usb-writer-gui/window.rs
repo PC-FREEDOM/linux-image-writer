@@ -791,6 +791,8 @@ struct TargetView {
     available: Vec<EntryView>,
     too_small: Vec<EntryView>,
     protected: Vec<EntryView>,
+    // What to say when nothing can be chosen.
+    no_available: model::NoAvailableTarget,
     selected: Option<usize>,
     auto: bool,
     details: Vec<(&'static str, String)>,
@@ -816,6 +818,7 @@ fn target_view(state: &State) -> TargetView {
         available: Vec::new(),
         too_small: Vec::new(),
         protected: Vec::new(),
+        no_available: model::NoAvailableTarget::NoUsb,
         selected: state.selected,
         auto: state
             .choice
@@ -854,6 +857,13 @@ fn target_view(state: &State) -> TargetView {
             }),
         }
     }
+    view.no_available = model::no_available_target(view.protected.iter().map(|entry| {
+        let candidate = &state.candidates[entry.index];
+        (
+            candidate.display().connection_bus.as_str(),
+            candidate.assessment().reasons.as_slice(),
+        )
+    }));
     if let Some(candidate) = state.selected.and_then(|index| state.candidates.get(index)) {
         view.details = target_details(candidate);
     }
@@ -940,11 +950,8 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
             row.add_prefix(&spinner);
             rows.append(&row);
         } else if view.too_small.is_empty() {
-            rows.append(&status_row(
-                "drive-removable-media-symbolic",
-                "USB ドライブが見つかりません",
-                "書き込み先の USB ドライブを接続してください",
-            ));
+            let (title, line) = text::no_available_target(view.no_available);
+            rows.append(&status_row("drive-removable-media-symbolic", title, line));
         } else {
             rows.append(&status_row(
                 "drive-removable-media-symbolic",

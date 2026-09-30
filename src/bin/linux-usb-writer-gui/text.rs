@@ -10,7 +10,7 @@ use linux_usb_writer::{
     VerifyUnavailableReason, WorkerConfirmationRequest,
 };
 
-use crate::model::{ClearReason, VerifyNotice, WriteBlocker};
+use crate::model::{ClearReason, NoAvailableTarget, VerifyNotice, WriteBlocker};
 use crate::operation::{Activity, Mark, Reason, Step, Tracker};
 use crate::result::{RemovalNotice, RemovalStatus, ResultAction, ResultCase, ResultKind, StepLine};
 
@@ -176,6 +176,26 @@ pub fn risk_level_name(level: &RiskLevel) -> &'static str {
         RiskLevel::Normal => "Normal",
         RiskLevel::Caution => "Caution",
         RiskLevel::Blocked => "Blocked",
+    }
+}
+
+// What the target section says when no drive can be chosen (title, line
+// under it). Never a promise that a drive will become selectable: the
+// Safety Engine decides that again on the next refresh.
+pub fn no_available_target(state: NoAvailableTarget) -> (&'static str, &'static str) {
+    match state {
+        NoAvailableTarget::NoUsb => (
+            "USB ドライブが見つかりません",
+            "書き込み先の USB ドライブを接続してください",
+        ),
+        NoAvailableTarget::UsbInUse => (
+            "接続されている USB ドライブは使用中のため選べません",
+            "ファイルマネージャーでマウントを解除してから、もう一度お試しください",
+        ),
+        NoAvailableTarget::UsbProtected => (
+            "接続されている USB ドライブは書き込み先に選べません",
+            "理由は「保護されているデバイス」で確認できます",
+        ),
     }
 }
 
@@ -1282,6 +1302,34 @@ mod tests {
                 assert_ne!(removal_icon(RemovalNotice::Finished(status)), removed);
             }
         }
+    }
+
+    #[test]
+    fn no_available_target_says_what_to_do_without_promises() {
+        assert_eq!(
+            no_available_target(NoAvailableTarget::NoUsb),
+            (
+                "USB ドライブが見つかりません",
+                "書き込み先の USB ドライブを接続してください"
+            )
+        );
+        for state in [NoAvailableTarget::UsbInUse, NoAvailableTarget::UsbProtected] {
+            let (title, line) = no_available_target(state);
+            let said = format!("{title}\n{line}");
+            for forbidden in [
+                "見つかりません",
+                "接続してください",
+                "取り外",
+                "選べるようになります",
+                "選べます",
+            ] {
+                assert!(!said.contains(forbidden), "{state:?}: {said}");
+            }
+        }
+        let (title, line) = no_available_target(NoAvailableTarget::UsbProtected);
+        assert!(!format!("{title}{line}").contains("マウント"));
+        let (_, line) = no_available_target(NoAvailableTarget::UsbInUse);
+        assert!(line.contains("マウントを解除"));
     }
 
     #[test]

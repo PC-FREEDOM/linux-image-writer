@@ -11,7 +11,7 @@
 // "Write" being enabled authorizes nothing: the operation re-checks
 // everything itself when it runs.
 
-use linux_usb_writer::{DeviceCandidate, TargetRef, VerifyAvailability, VerifyMode};
+use linux_usb_writer::{DeviceCandidate, RiskReason, TargetRef, VerifyAvailability, VerifyMode};
 
 // ---- Target selection ----
 
@@ -315,6 +315,48 @@ impl VerifyState {
             preferred: self.preferred,
             ..VerifyState::initial()
         }
+    }
+}
+
+// ---- When no target can be chosen ----
+
+// Why no USB drive can be offered as a target, as far as the list says --
+// for wording only. Read off each protected entry's connection bus and the
+// Safety Engine's own reasons; nothing here judges a device again or
+// predicts what a later assessment would say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoAvailableTarget {
+    // No USB drive is listed.
+    NoUsb,
+    // A USB drive is listed, protected because it is mounted.
+    UsbInUse,
+    // USB drives are listed, protected for other reasons only.
+    UsbProtected,
+}
+
+// `protected`: each protected entry's connection bus and Safety reasons.
+// A mounted USB drive comes first: it is the one the user can act on (the
+// other drives' reasons stay listed with them).
+pub fn no_available_target<'a>(
+    protected: impl IntoIterator<Item = (&'a str, &'a [RiskReason])>,
+) -> NoAvailableTarget {
+    let mut usb = false;
+    for (bus, reasons) in protected {
+        if bus != "usb" {
+            continue;
+        }
+        if reasons
+            .iter()
+            .any(|reason| matches!(reason, RiskReason::MountedFilesystem))
+        {
+            return NoAvailableTarget::UsbInUse;
+        }
+        usb = true;
+    }
+    if usb {
+        NoAvailableTarget::UsbProtected
+    } else {
+        NoAvailableTarget::NoUsb
     }
 }
 
@@ -900,5 +942,54 @@ mod tests {
         // start.
         let started = reconcile(choice, &[usb("/dev/sdb", 2)], RAW_2GB);
         assert_eq!(path(&started), Some("/dev/sdb"));
+    }
+
+    // ---- When no target can be chosen ----
+
+    #[test]
+    fn why_no_usb_drive_can_be_offered() {
+        use RiskReason::*;
+        let classify = |entries: &[(&'static str, Vec<RiskReason>)]| {
+            no_available_target(
+                entries
+                    .iter()
+                    .map(|(bus, reasons)| (*bus, reasons.as_slice())),
+            )
+        };
+        let internal = || ("nvme", vec![CriticalMount, SystemDevice]);
+
+        assert_eq!(classify(&[]), NoAvailableTarget::NoUsb);
+        assert_eq!(classify(&[internal()]), NoAvailableTarget::NoUsb);
+        assert_eq!(
+            classify(&[internal(), ("usb", vec![MountedFilesystem])]),
+            NoAvailableTarget::UsbInUse
+        );
+        for reasons in [
+            vec![ReadOnly],
+            vec![MediaUnavailable],
+            vec![UnknownOrNonRemovable],
+            // A USB drive the system runs from: never "unmount it".
+            vec![CriticalMount],
+        ] {
+            assert_eq!(
+                classify(&[internal(), ("usb", reasons.clone())]),
+                NoAvailableTarget::UsbProtected,
+                "{reasons:?}"
+            );
+        }
+        // A mounted disk on another bus is not a USB drive in use.
+        assert_eq!(
+            classify(&[internal(), ("ata", vec![MountedFilesystem])]),
+            NoAvailableTarget::NoUsb
+        );
+        // Both kinds: the mounted one is the one to act on, in either order.
+        assert_eq!(
+            classify(&[("usb", vec![ReadOnly]), ("usb", vec![MountedFilesystem])]),
+            NoAvailableTarget::UsbInUse
+        );
+        assert_eq!(
+            classify(&[("usb", vec![MountedFilesystem]), ("usb", vec![ReadOnly])]),
+            NoAvailableTarget::UsbInUse
+        );
     }
 }
