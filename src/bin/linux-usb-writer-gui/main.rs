@@ -14,8 +14,11 @@
 // `Cancelled`, and cancellation). Nothing here opens a device.
 //
 // The result view (Phase 3B-1b-3a) reads the worker's outcome and whether
-// it handed out a Safe Removal target (`WriteWorker::removal_target`);
-// nothing here unmounts or powers off a device.
+// it handed out a Safe Removal target (`WriteWorker::removal_target`). For
+// that target only, "Safely remove" asks the library to do it
+// (`request_safe_removal`, Phase 3B-1b-3b, off the GTK thread), which
+// re-checks, unmounts and powers off by itself; this program shows its
+// outcome.
 //
 //   linux-usb-writer-gui [image]   (an image given here is inspected at start)
 

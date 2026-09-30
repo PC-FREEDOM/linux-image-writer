@@ -12,7 +12,7 @@ use linux_usb_writer::{
 
 use crate::model::{ClearReason, VerifyNotice, WriteBlocker};
 use crate::operation::{Activity, Mark, Reason, Step, Tracker};
-use crate::result::{ResultAction, ResultCase, ResultKind, StepLine};
+use crate::result::{RemovalNotice, RemovalStatus, ResultAction, ResultCase, ResultKind, StepLine};
 
 // ---- Sizes ----
 
@@ -474,11 +474,96 @@ pub fn result_message(case: ResultCase) -> String {
 pub fn result_action(action: ResultAction) -> &'static str {
     match action {
         ResultAction::SafeRemoval => "安全に取り外す",
+        ResultAction::RetryRemoval => "もう一度試す",
         ResultAction::WriteAnother => "別の USB に書き込む",
         ResultAction::WriteAgain => "もう一度書き込む",
         ResultAction::Retry => "やり直す",
         ResultAction::BackToMain => "メイン画面に戻る",
         ResultAction::Done => "完了",
+    }
+}
+
+// ---- Safe Removal ----
+
+// What the result view says about Safe Removal: a title, a message and, when
+// the outcome says so, one extra line. Worded from the status only -- never
+// from an error's own text, which may name object paths or serial numbers.
+// Only `Removed` says the drive can be removed; a failure never claims that
+// nothing was changed (filesystems may have been unmounted before it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalText {
+    pub title: &'static str,
+    pub message: String,
+    pub extra: Option<&'static str>,
+}
+
+// `target_name`: the target as the operation's own events named it.
+pub fn removal(notice: RemovalNotice, target_name: Option<&str>) -> RemovalText {
+    const DO_NOT_REMOVE: &str = "USB ドライブはまだ取り外さないでください。";
+    const ELSEWHERE: &str = "ファイルマネージャーなどから取り外してください。";
+    let text = |title, message: &str| RemovalText {
+        title,
+        message: message.to_string(),
+        extra: None,
+    };
+    let status = match notice {
+        RemovalNotice::Removing => return text("USB を安全に取り外しています…", DO_NOT_REMOVE),
+        RemovalNotice::Finished(status) => status,
+    };
+    match status {
+        RemovalStatus::Removed {
+            unmounted_filesystems,
+        } => RemovalText {
+            title: "USB を安全に取り外せます",
+            message: format!(
+                "{}をパソコンから取り外してください。",
+                match target_name {
+                    Some(name) => format!("{name} "),
+                    None => "USB ドライブ".to_string(),
+                }
+            ),
+            extra: unmounted_filesystems.then_some("ファイルシステムを終了しました"),
+        },
+        RemovalStatus::DeviceGone => text(
+            "USB が見つかりません",
+            "USB ドライブが接続されていることを確認してください。",
+        ),
+        RemovalStatus::DeviceChanged => text(
+            "USB の状態が変わりました",
+            "書き込み時と同じデバイスであることを確認できなかったため、安全な取り外しを中止しました。",
+        ),
+        RemovalStatus::Unsupported => text("この USB はアプリから安全に取り外せません", ELSEWHERE),
+        RemovalStatus::Busy => text(
+            "USB を取り外せませんでした",
+            "USB ドライブがほかのアプリで使用されています。使用中のファイルやアプリを閉じて、もう一度お試しください。",
+        ),
+        RemovalStatus::NotAuthorized => RemovalText {
+            title: "安全な取り外しを実行できませんでした",
+            message: format!("この操作を実行する権限がありません。{ELSEWHERE}"),
+            extra: None,
+        },
+        RemovalStatus::NotCompleted => RemovalText {
+            title: "安全な取り外しを完了できませんでした",
+            message: format!("{DO_NOT_REMOVE}{ELSEWHERE}"),
+            extra: None,
+        },
+    }
+}
+
+// The icon next to the Safe Removal status (always with its title). Not the
+// result's own icons for a failed write or Verify.
+pub fn removal_icon(notice: RemovalNotice) -> Option<&'static str> {
+    match notice {
+        // A spinner is shown instead.
+        RemovalNotice::Removing => None,
+        RemovalNotice::Finished(status) => Some(match status {
+            RemovalStatus::Removed { .. } => "emblem-ok-symbolic",
+            RemovalStatus::DeviceGone | RemovalStatus::Unsupported => "dialog-information-symbolic",
+            RemovalStatus::DeviceChanged
+            | RemovalStatus::Busy
+            | RemovalStatus::NotAuthorized
+            | RemovalStatus::NotCompleted => "dialog-warning-symbolic",
+        }),
     }
 }
 
@@ -1022,6 +1107,179 @@ mod tests {
         for a in kinds {
             for b in kinds {
                 assert_eq!(a == b, result_icon(a) == result_icon(b));
+            }
+        }
+    }
+
+    // ---- Safe Removal ----
+
+    fn every_status() -> Vec<RemovalStatus> {
+        vec![
+            RemovalStatus::Removed {
+                unmounted_filesystems: false,
+            },
+            RemovalStatus::Removed {
+                unmounted_filesystems: true,
+            },
+            RemovalStatus::DeviceGone,
+            RemovalStatus::DeviceChanged,
+            RemovalStatus::Unsupported,
+            RemovalStatus::Busy,
+            RemovalStatus::NotAuthorized,
+            RemovalStatus::NotCompleted,
+        ]
+    }
+
+    fn said(text: &RemovalText) -> String {
+        format!(
+            "{}\n{}\n{}",
+            text.title,
+            text.message,
+            text.extra.unwrap_or("")
+        )
+    }
+
+    #[test]
+    fn removed_names_the_drive_and_says_it_can_be_removed() {
+        let removed = |unmounted_filesystems, name| {
+            removal(
+                RemovalNotice::Finished(RemovalStatus::Removed {
+                    unmounted_filesystems,
+                }),
+                name,
+            )
+        };
+        let text = removed(false, Some("General UDisk"));
+        assert_eq!(text.title, "USB を安全に取り外せます");
+        assert_eq!(
+            text.message,
+            "General UDisk をパソコンから取り外してください。"
+        );
+        assert_eq!(text.extra, None);
+        assert_eq!(
+            removed(false, None).message,
+            "USB ドライブをパソコンから取り外してください。"
+        );
+        // Only when the outcome lists filesystems it unmounted.
+        assert_eq!(
+            removed(true, Some("General UDisk")).extra,
+            Some("ファイルシステムを終了しました")
+        );
+    }
+
+    #[test]
+    fn removing_says_not_to_remove_yet() {
+        let text = removal(RemovalNotice::Removing, Some("General UDisk"));
+        assert_eq!(text.title, "USB を安全に取り外しています…");
+        assert_eq!(text.message, "USB ドライブはまだ取り外さないでください。");
+        assert_eq!(removal_icon(RemovalNotice::Removing), None);
+    }
+
+    #[test]
+    fn each_failure_reads_as_specified() {
+        let finished = |status| removal(RemovalNotice::Finished(status), Some("General UDisk"));
+        assert_eq!(
+            finished(RemovalStatus::DeviceGone).title,
+            "USB が見つかりません"
+        );
+        assert_eq!(
+            finished(RemovalStatus::DeviceGone).message,
+            "USB ドライブが接続されていることを確認してください。"
+        );
+        assert_eq!(
+            finished(RemovalStatus::DeviceChanged).title,
+            "USB の状態が変わりました"
+        );
+        assert!(
+            finished(RemovalStatus::DeviceChanged)
+                .message
+                .contains("同じデバイス")
+        );
+        assert_eq!(
+            finished(RemovalStatus::Unsupported).title,
+            "この USB はアプリから安全に取り外せません"
+        );
+        assert_eq!(
+            finished(RemovalStatus::Unsupported).message,
+            "ファイルマネージャーなどから取り外してください。"
+        );
+        assert_eq!(
+            finished(RemovalStatus::Busy).title,
+            "USB を取り外せませんでした"
+        );
+        assert!(
+            finished(RemovalStatus::Busy)
+                .message
+                .contains("もう一度お試しください")
+        );
+        assert_eq!(
+            finished(RemovalStatus::NotAuthorized).title,
+            "安全な取り外しを実行できませんでした"
+        );
+        assert!(
+            finished(RemovalStatus::NotAuthorized)
+                .message
+                .contains("権限がありません")
+        );
+        let not_completed = finished(RemovalStatus::NotCompleted);
+        assert_eq!(not_completed.title, "安全な取り外しを完了できませんでした");
+        assert!(not_completed.message.contains("まだ取り外さないでください"));
+    }
+
+    // Only Removed says the drive can be removed; nothing overstates what
+    // powering off means, and no failure claims nothing was changed (or
+    // calls the drive faulty).
+    #[test]
+    fn only_removed_says_the_drive_can_be_removed() {
+        for status in every_status() {
+            let text = said(&removal(
+                RemovalNotice::Finished(status),
+                Some("General UDisk"),
+            ));
+            let removed = matches!(status, RemovalStatus::Removed { .. });
+            assert_eq!(text.contains("安全に取り外せます"), removed, "{status:?}");
+            for forbidden in [
+                "電源を切りました",
+                "完全に安全",
+                "絶対",
+                "何も変更",
+                "何もしていません",
+                "Unmount",
+                "故障",
+                "異常",
+            ] {
+                assert!(!text.contains(forbidden), "{status:?}: {text}");
+            }
+        }
+        assert!(!said(&removal(RemovalNotice::Removing, None)).contains("取り外せます"));
+    }
+
+    // Worded from the status alone: no error text, object path, stage or
+    // serial number can reach it.
+    #[test]
+    fn removal_texts_show_no_raw_errors_or_identifiers() {
+        for status in every_status() {
+            let text = said(&removal(
+                RemovalNotice::Finished(status),
+                Some("General UDisk"),
+            ));
+            for raw in [
+                "Error", "/org/", "UDisks2", "PowerOff", "diskseq", "SERIAL", "::", "{",
+            ] {
+                assert!(!text.contains(raw), "{status:?}: {text}");
+            }
+        }
+    }
+
+    // Removed has its own icon, apart from every failure.
+    #[test]
+    fn removal_icons_tell_success_from_failure() {
+        let removed = removal_icon(RemovalNotice::Finished(RemovalStatus::Removed {
+            unmounted_filesystems: false,
+        }));
+        for status in every_status() {
+            if !matches!(status, RemovalStatus::Removed { .. }) {
+                assert_ne!(removal_icon(RemovalNotice::Finished(status)), removed);
             }
         }
     }

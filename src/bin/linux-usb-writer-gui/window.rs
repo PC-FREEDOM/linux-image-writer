@@ -19,7 +19,7 @@ use linux_usb_writer::{
     CandidateListError, ConfirmationDecision, DeviceCandidate, ImageInfo, OperationOutcome,
     RemovalTarget, TargetRef, VerifyAvailability, VerifyMode, WorkerConfirmationRequest,
     WorkerMessage, WriteOperationRequest, WriteWorker, inspect_image, list_candidates,
-    spawn_write_worker,
+    request_safe_removal, spawn_write_worker,
 };
 
 use crate::expansion::{self, Panel};
@@ -28,7 +28,7 @@ use crate::model::{
     VerifyState,
 };
 use crate::operation::{self, CancelAction, Ending, STEPS, Tracker};
-use crate::result::{self, Leaving, RemovalPresentation, ResultAction};
+use crate::result::{self, Leaving, RemovalPresentation, RemovalStatus, ResultAction};
 use crate::text;
 
 // How often the device list is read again (and whenever the window becomes
@@ -138,11 +138,26 @@ struct OperationUi {
     progress: gtk::ProgressBar,
     amount: gtk::Label,
     message: gtk::Label,
+    // Safe Removal, apart from the operation's own result.
+    removal: RemovalUi,
     details: Vec<adw::ActionRow>,
     cancel: gtk::Button,
     // The result's actions, one button each, shown as the result offers
     // them.
     actions: Vec<(ResultAction, gtk::Button)>,
+    // The one row every result action sits in, side by side; hidden while
+    // the operation runs.
+    action_row: gtk::Box,
+}
+
+// The result view's Safe Removal section: one status row (a spinner while
+// it runs, else an icon) and, when the outcome says so, one more line.
+struct RemovalUi {
+    list: gtk::ListBox,
+    status: adw::ActionRow,
+    spinner: gtk::Spinner,
+    icon: gtk::Image,
+    extra: adw::ActionRow,
 }
 
 struct Ui {
@@ -329,7 +344,18 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         let ui_ref = ui.clone();
         ui.window.connect_close_request(move |_| {
             if operation_running(&ui_ref) {
-                show_cannot_close(&ui_ref);
+                show_cannot_close(
+                    &ui_ref,
+                    "書き込み処理の実行中です",
+                    "処理が終わるまで、ウィンドウは閉じられません。中止する場合は「キャンセル」を押してください。",
+                );
+                glib::Propagation::Stop
+            } else if removal_running(&ui_ref) {
+                show_cannot_close(
+                    &ui_ref,
+                    "USB を安全に取り外しています",
+                    "完了するまで、ウィンドウは閉じられません。USB ドライブはまだ取り外さないでください。",
+                );
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -1379,7 +1405,7 @@ fn finish(ui: &Rc<Ui>, outcome: Option<OperationOutcome>) {
 // for the main view applies what the action keeps (`MainReturn`), then
 // drops the whole operation (`back_to_main`).
 fn result_action(ui: &Rc<Ui>, action: ResultAction) {
-    if operation_running(ui) {
+    if operation_running(ui) || removal_running(ui) {
         return;
     }
     let removal = match ui.operation.borrow_mut().as_mut() {
@@ -1392,6 +1418,12 @@ fn result_action(ui: &Rc<Ui>, action: ResultAction) {
         Leaving::Stay(removal) => {
             if let Some(operation) = ui.operation.borrow_mut().as_mut() {
                 operation.removal = removal;
+            }
+            if matches!(
+                action,
+                ResultAction::SafeRemoval | ResultAction::RetryRemoval
+            ) {
+                start_removal(ui);
             }
         }
         Leaving::Main(ret) => {
@@ -1416,10 +1448,66 @@ fn result_action(ui: &Rc<Ui>, action: ResultAction) {
     }
 }
 
+// ---- Safe Removal ----
+
+fn removal_running(ui: &Ui) -> bool {
+    ui.operation
+        .borrow()
+        .as_ref()
+        .is_some_and(|operation| operation.removal.is_removing())
+}
+
+// Starts Safe Removal for the finished operation's target: the state goes
+// to `Removing` (taking the target, so no second request can start), the
+// view shows it at once, and the library's blocking request runs on GIO's
+// blocking pool -- never on the GTK thread. Its outcome, with the target,
+// comes back here and becomes the state's `Finished`.
+fn start_removal(ui: &Rc<Ui>) {
+    let target = {
+        let mut operation = ui.operation.borrow_mut();
+        let Some(operation) = operation.as_mut() else {
+            return;
+        };
+        if operation.ended.is_none() {
+            return;
+        }
+        operation.removal.begin()
+    };
+    let Some(target) = target else {
+        return;
+    };
+    render_operation(ui);
+
+    let ui_ref = ui.clone();
+    glib::spawn_future_local(async move {
+        let ended = gio::spawn_blocking(move || {
+            let outcome = request_safe_removal(&target);
+            (target, RemovalStatus::from_outcome(&outcome))
+        })
+        .await;
+        let dialogs = {
+            let mut operation = ui_ref.operation.borrow_mut();
+            let Some(operation) = operation.as_mut() else {
+                return;
+            };
+            match ended {
+                Ok((target, status)) => operation.removal.end(target, status),
+                Err(_) => operation.removal.end_without_outcome(),
+            }
+            std::mem::take(&mut operation.dialogs)
+        };
+        // A "cannot close" notice shown meanwhile is over.
+        for dialog in dialogs {
+            dialog.force_close();
+        }
+        render_operation(&ui_ref);
+    });
+}
+
 // Leaves the operation view. The choices made before "Write" are still
 // there; the device list's next refresh applies the usual selection rules.
 fn back_to_main(ui: &Rc<Ui>, toast: Option<&str>) {
-    if operation_running(ui) {
+    if operation_running(ui) || removal_running(ui) {
         return;
     }
     *ui.operation.borrow_mut() = None;
@@ -1613,22 +1701,17 @@ fn ask_to_stop_writing(ui: &Rc<Ui>) {
 }
 
 // Shown once at a time, and closed when the operation ends.
-fn show_cannot_close(ui: &Rc<Ui>) {
-    const HEADING: &str = "書き込み処理の実行中です";
+fn show_cannot_close(ui: &Rc<Ui>, heading: &str, body: &str) {
     let shown = ui.operation.borrow().as_ref().is_some_and(|operation| {
         operation
             .dialogs
             .iter()
-            .any(|dialog| dialog.heading().as_deref() == Some(HEADING))
+            .any(|dialog| dialog.heading().as_deref() == Some(heading))
     });
     if shown {
         return;
     }
-    let dialog = show_message(
-        ui,
-        HEADING,
-        "処理が終わるまで、ウィンドウは閉じられません。中止する場合は「キャンセル」を押してください。",
-    );
+    let dialog = show_message(ui, heading, body);
     let ui_ref = ui.clone();
     dialog.connect_response(None, move |dialog, _| forget_dialog(&ui_ref, dialog));
     if let Some(operation) = ui.operation.borrow_mut().as_mut() {
@@ -1714,6 +1797,28 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     let amount = centered(&["dim-label", "numeric"]);
     let message = centered(&[]);
 
+    let removal = {
+        let list = list();
+        list.set_visible(false);
+        let status = row("", "");
+        status.set_subtitle_lines(0);
+        let spinner = gtk::Spinner::builder().spinning(true).build();
+        spinner.update_property(&[gtk::accessible::Property::Label("処理中")]);
+        let icon = gtk::Image::new();
+        status.add_prefix(&spinner);
+        status.add_prefix(&icon);
+        let extra = status_row("emblem-ok-symbolic", "", "");
+        list.append(&status);
+        list.append(&extra);
+        RemovalUi {
+            list,
+            status,
+            spinner,
+            icon,
+            extra,
+        }
+    };
+
     let details_list = list();
     let expander = adw::ExpanderRow::builder().build();
     expander.set_use_markup(false);
@@ -1746,6 +1851,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         progress.upcast_ref(),
         amount.upcast_ref(),
         message.upcast_ref(),
+        removal.list.upcast_ref(),
         details_list.upcast_ref(),
     ] {
         content.append(widget);
@@ -1773,10 +1879,19 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .margin_bottom(8)
         .build();
     bottom.append(&cancel);
-    // Safe Removal's button is added together with the request it starts
-    // (off the GTK thread); until then the result offers it in its model
-    // only, and no button that would do nothing is shown.
+    // Shown only as the result offers them (Safe Removal only for a target
+    // the finished worker handed out): one centered group in one row, each
+    // button as wide as its label, a small fixed gap between them.
+    let action_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    bottom.append(&action_row);
     let actions = [
+        ResultAction::SafeRemoval,
+        ResultAction::RetryRemoval,
         ResultAction::WriteAnother,
         ResultAction::WriteAgain,
         ResultAction::Retry,
@@ -1791,7 +1906,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             .css_classes(["pill"])
             .visible(false)
             .build();
-        bottom.append(&button);
+        action_row.append(&button);
         (action, button)
     })
     .collect();
@@ -1815,9 +1930,11 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             progress,
             amount,
             message,
+            removal,
             details,
             cancel,
             actions,
+            action_row,
         },
         page,
     )
@@ -1889,12 +2006,14 @@ fn render_operation(ui: &Ui) {
             }
             op.message.set_visible(false);
             op.icon.set_visible(false);
+            op.removal.list.set_visible(false);
             let action = tracker.cancel_action();
             op.cancel.set_visible(true);
             op.cancel.set_sensitive(action != CancelAction::Unavailable);
             for (_, button) in &op.actions {
                 button.set_visible(false);
             }
+            op.action_row.set_visible(false);
         }
         Some(view) => {
             op.icon.set_icon_name(Some(text::result_icon(view.kind)));
@@ -1908,11 +2027,22 @@ fn render_operation(ui: &Ui) {
             op.message.set_text(&text::result_message(view.case));
             op.message.set_visible(true);
             op.cancel.set_visible(false);
-            // The first action shown is the suggested one.
+            render_removal(
+                &op.removal,
+                view.removal,
+                tracker
+                    .target
+                    .as_ref()
+                    .map(|target| text::device_name(&target.vendor, &target.model))
+                    .as_deref(),
+            );
+            // The first action shown is the suggested one; none can be
+            // pressed while Safe Removal runs.
             let mut first = true;
             for (action, button) in &op.actions {
                 let offered = view.actions.contains(action);
                 button.set_visible(offered);
+                button.set_sensitive(view.actions_enabled);
                 if offered && first {
                     button.add_css_class("suggested-action");
                     first = false;
@@ -1920,6 +2050,7 @@ fn render_operation(ui: &Ui) {
                     button.remove_css_class("suggested-action");
                 }
             }
+            op.action_row.set_visible(!view.actions.is_empty());
         }
     }
     // Before the outcome is joined and shown, neither button acts.
@@ -1980,4 +2111,39 @@ fn render_operation(ui: &Ui) {
     for (row, value) in op.details.iter().zip(values) {
         row.set_subtitle(&value);
     }
+}
+
+// The Safe Removal section, from the result view's notice. `target_name` is
+// the target as the operation's own events named it.
+fn render_removal(
+    ui: &RemovalUi,
+    notice: Option<result::RemovalNotice>,
+    target_name: Option<&str>,
+) {
+    let Some(notice) = notice else {
+        ui.list.set_visible(false);
+        return;
+    };
+    let words = text::removal(notice, target_name);
+    ui.status.set_title(words.title);
+    ui.status.set_subtitle(&words.message);
+    match text::removal_icon(notice) {
+        Some(icon) => {
+            ui.icon.set_icon_name(Some(icon));
+            ui.icon.set_visible(true);
+            ui.spinner.set_visible(false);
+        }
+        None => {
+            ui.icon.set_visible(false);
+            ui.spinner.set_visible(true);
+        }
+    }
+    match words.extra {
+        Some(extra) => {
+            ui.extra.set_title(extra);
+            ui.extra.set_visible(true);
+        }
+        None => ui.extra.set_visible(false),
+    }
+    ui.list.set_visible(true);
 }
