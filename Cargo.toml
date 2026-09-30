@@ -2,6 +2,9 @@
 name = "linux-usb-writer"
 version = "0.1.0"
 edition = "2024"
+description = "A simple and safety-focused USB image writer for Linux"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/PC-FREEDOM/linux-usb-writer"
 
 # The library (src/lib.rs) exposes only the Production API; every other
 # module is private to it. The CLI binary (src/main.rs) compiles the same

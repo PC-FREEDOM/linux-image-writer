@@ -32,8 +32,10 @@ mod window;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-// TODO: the formal application ID is decided with the packaging work.
-const APP_ID: &str = "io.github.pcfreedom.LinuxUsbWriter";
+// The canonical application ID (GitHub account PC-FREEDOM, the hyphen
+// written as an underscore). The desktop entry, AppStream metainfo, icon
+// name and Flatpak manifest use the same ID.
+const APP_ID: &str = "io.github.pc_freedom.LinuxUsbWriter";
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder()
