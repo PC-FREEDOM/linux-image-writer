@@ -1,2 +1,8 @@
 /target
 /reports/latest.md
+
+# Flatpak build outputs
+.flatpak-builder/
+build-dir/
+repo/
+*.flatpak

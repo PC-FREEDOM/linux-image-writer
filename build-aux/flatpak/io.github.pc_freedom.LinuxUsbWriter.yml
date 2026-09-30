@@ -1,0 +1,52 @@
+# Production Flatpak manifest for Linux USB Writer (local development
+# builds: the source is this repository's working tree).
+#
+# Only the GUI is built and installed; the diagnostic CLI is not.
+# Permissions are the minimum the GUI needs: a display, and the UDisks2 name
+# on the system bus (device list, OpenDevice, Unmount, PowerOff). Images come
+# through the document portal; devices through UDisks2's OpenDevice.
+#
+# Cargo builds offline from cargo-sources.json, generated from Cargo.lock by
+# flatpak-builder-tools' flatpak-cargo-generator.py. Regenerate it whenever
+# Cargo.lock changes.
+app-id: io.github.pc_freedom.LinuxUsbWriter
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: linux-usb-writer-gui
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --system-talk-name=org.freedesktop.UDisks2
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: linux-usb-writer
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/linux-usb-writer/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked --features gui --bin linux-usb-writer-gui
+      - install -Dm755 target/release/linux-usb-writer-gui -t /app/bin/
+      - install -Dm644 data/io.github.pc_freedom.LinuxUsbWriter.desktop -t /app/share/applications/
+      - install -Dm644 data/io.github.pc_freedom.LinuxUsbWriter.metainfo.xml -t /app/share/metainfo/
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.pc_freedom.LinuxUsbWriter.svg
+        -t /app/share/icons/hicolor/scalable/apps/
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - reports
+          - poc
+          - .flatpak-builder
+          - build-dir
+          - repo
+      - cargo-sources.json
