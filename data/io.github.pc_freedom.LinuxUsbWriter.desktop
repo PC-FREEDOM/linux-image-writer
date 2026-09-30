@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Linux USB Writer
+Comment=Write disk images to USB drives
+Comment[ja]=ディスクイメージを USB ドライブに書き込みます
+Exec=linux-usb-writer-gui %U
+Icon=io.github.pc_freedom.LinuxUsbWriter
+Terminal=false
+Categories=System;
+Keywords=USB;ISO;IMG;image;disk;flash;writer;bootable;
+StartupNotify=true
+MimeType=application/vnd.efi.iso;application/x-cd-image;application/x-iso9660-image;application/vnd.efi.img;application/x-raw-disk-image;application/x-raw-disk-image-xz-compressed;

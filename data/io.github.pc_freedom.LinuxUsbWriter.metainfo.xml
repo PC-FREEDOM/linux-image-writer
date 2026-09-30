@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.pc_freedom.LinuxUsbWriter</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Linux USB Writer</name>
+  <summary>Write disk images to USB drives</summary>
+  <summary xml:lang="ja">ディスクイメージを USB ドライブに書き込みます</summary>
+
+  <developer id="io.github.pc_freedom">
+    <name>PC-FREEDOM</name>
+  </developer>
+
+  <description>
+    <p>
+      Linux USB Writer writes disk images to USB drives through a simple
+      graphical interface.
+    </p>
+    <p xml:lang="ja">
+      Linux USB Writer は、シンプルな画面でディスクイメージを USB ドライブに書き込むアプリです。
+    </p>
+    <ul>
+      <li>Writes ISO and IMG images, as well as gzip and xz compressed images, which are decompressed while they are written</li>
+      <li xml:lang="ja">ISO と IMG のイメージに加えて、gzip と xz で圧縮されたイメージも書き込めます。圧縮されたイメージは、展開しながら書き込みます</li>
+      <li>Offers only USB drives that can be written to: system disks, and drives that are in use or otherwise unsuitable, cannot be selected</li>
+      <li xml:lang="ja">書き込み先として選べるのは、書き込み可能な USB ドライブだけです。システムのディスクや、使用中などの理由で適さないドライブは選べません</li>
+      <li>Checks the selected drive again before writing</li>
+      <li xml:lang="ja">書き込みの直前に、選択したドライブをもう一度確認します</li>
+      <li>Optionally verifies the written data afterwards, with a quick or a full check; quick verification may be unavailable for compressed images</li>
+      <li xml:lang="ja">書き込み後に、書き込んだデータをクイック検証または完全検証で確認できます(検証しないことも選べます)。圧縮されたイメージでは、クイック検証を利用できない場合があります</li>
+      <li>After writing, prepares supported USB drives for removal by unmounting and powering them off</li>
+      <li xml:lang="ja">書き込み後、対応している USB ドライブのマウントを解除して電源を切り、取り外せる状態にできます</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.pc_freedom.LinuxUsbWriter.desktop</launchable>
+
+  <url type="homepage">https://github.com/PC-FREEDOM/linux-usb-writer</url>
+  <url type="bugtracker">https://github.com/PC-FREEDOM/linux-usb-writer/issues</url>
+  <url type="vcs-browser">https://github.com/PC-FREEDOM/linux-usb-writer</url>
+
+  <provides>
+    <binary>linux-usb-writer-gui</binary>
+  </provides>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+  <branding>
+    <color type="primary">#FFCC00</color>
+  </branding>
+</component>

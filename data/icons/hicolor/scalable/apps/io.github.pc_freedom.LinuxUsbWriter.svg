@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Linux USB Writer application icon (io.github.pc_freedom.LinuxUsbWriter).
+     SPDX-License-Identifier: GPL-3.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="background" x1="6" y1="6" x2="122" y2="122" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF27D"/>
+      <stop offset="0.2" stop-color="#FFE033"/>
+      <stop offset="0.45" stop-color="#FFCC00"/>
+      <stop offset="0.75" stop-color="#FFA800"/>
+      <stop offset="1" stop-color="#FF7A00"/>
+    </linearGradient>
+    <linearGradient id="body" x1="47.11" y1="54.62" x2="79.76" y2="103.75" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#565C66"/>
+      <stop offset="0.35" stop-color="#2F353E"/>
+      <stop offset="1" stop-color="#151A21"/>
+    </linearGradient>
+    <linearGradient id="connector" x1="52.54" y1="37.9" x2="74.33" y2="55.07" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2F3F4"/>
+      <stop offset="1" stop-color="#C9CDD3"/>
+    </linearGradient>
+  </defs>
+  <!-- Tile, with a soft drop shadow -->
+  <rect x="6" y="7.5" width="116" height="116" rx="22" fill="#000000" opacity="0.1"/>
+  <rect x="6" y="6" width="116" height="116" rx="22" fill="url(#background)"/>
+  <!-- Circular arrow (plain white; its shadow a flat translucent copy) -->
+  <g transform="translate(0.5 1.2)" fill="#C86400" stroke="#C86400" opacity="0.22">
+    <path d="M 39.26 97.3 A 40.27 40.27 0 1 1 101.25 56.2" fill="none" stroke-width="8.36" stroke-linecap="round"/>
+    <path d="M 90.98 57.1 L 112.03 57.1 L 101.55 73.89 Z" stroke-width="3.16" stroke-linejoin="round"/>
+  </g>
+  <g fill="#FFFFFF" stroke="#FFFFFF">
+    <path d="M 39.26 97.3 A 40.27 40.27 0 1 1 101.25 56.2" fill="none" stroke-width="8.36" stroke-linecap="round"/>
+    <path d="M 90.98 57.1 L 112.03 57.1 L 101.55 73.89 Z" stroke-width="3.16" stroke-linejoin="round"/>
+  </g>
+  <!-- USB drive: shadow, connector, body -->
+  <rect x="47.11" y="54.62" width="32.64" height="49.13" rx="7.45" fill="#B85A00" opacity="0.3" transform="translate(0.8 1.8)"/>
+  <rect x="52.54" y="37.9" width="21.8" height="18.98" rx="0.56" fill="url(#connector)"/>
+  <rect x="56.38" y="45.02" width="4.29" height="4.29" rx="0.34" fill="#1F252C"/>
+  <rect x="66.09" y="45.02" width="4.41" height="4.29" rx="0.34" fill="#1F252C"/>
+  <rect x="47.11" y="54.62" width="32.64" height="49.13" rx="7.45" fill="url(#body)"/>
+  <!-- USB symbol -->
+  <g fill="#FFFFFF">
+    <circle cx="63.49" cy="68.28" r="2.09" />
+    <circle cx="63.44" cy="90.31" r="2.77" />
+    <circle cx="58.13" cy="75.74" r="1.92" />
+    <rect x="67.11" y="72.8" width="3.73" height="3.61" rx="0.45" />
+  </g>
+  <g fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 63.44 68.28 L 63.44 90.31" stroke-width="1.52"/>
+    <path d="M 58.18 75.74 L 58.18 80.82 L 63.44 85.11" stroke-width="1.41"/>
+    <path d="M 68.86 76.42 L 68.86 78.11 L 63.44 82.4" stroke-width="1.47"/>
+  </g>
+</svg>
