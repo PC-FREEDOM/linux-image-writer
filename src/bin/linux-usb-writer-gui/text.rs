@@ -199,6 +199,17 @@ pub fn no_available_target(state: NoAvailableTarget) -> (&'static str, &'static 
     }
 }
 
+// Why an image opened from outside (e.g. "Open with") was not taken:
+// `processing` while the operation or Safe Removal runs, otherwise while its
+// result is shown. The image stays as it was; nothing is queued.
+pub fn open_refused(processing: bool) -> &'static str {
+    if processing {
+        "処理中のため、別のイメージは開けません。処理が終わってから、もう一度お試しください"
+    } else {
+        "結果画面を閉じてから、もう一度お試しください"
+    }
+}
+
 // The detail (`CandidateListError`) goes to the technical details.
 pub fn candidate_list_error_message() -> &'static str {
     "デバイスの一覧を取得できませんでした"
@@ -1330,6 +1341,23 @@ mod tests {
         assert!(!format!("{title}{line}").contains("マウント"));
         let (_, line) = no_available_target(NoAvailableTarget::UsbInUse);
         assert!(line.contains("マウントを解除"));
+    }
+
+    #[test]
+    fn an_image_opened_meanwhile_is_refused_with_the_reason() {
+        let processing = open_refused(true);
+        let result = open_refused(false);
+        assert_ne!(processing, result);
+        assert!(processing.contains("処理中"), "{processing}");
+        assert!(!result.contains("処理中"), "{result}");
+        assert!(result.contains("結果画面"), "{result}");
+        // Nothing was switched, opened or queued.
+        for text in [processing, result] {
+            for misleading in ["切り替え", "開きました", "変更しました", "後で", "自動"]
+            {
+                assert!(!text.contains(misleading), "{text}");
+            }
+        }
     }
 
     #[test]

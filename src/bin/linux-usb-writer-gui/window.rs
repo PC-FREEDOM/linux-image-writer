@@ -209,13 +209,34 @@ pub fn present(app: &adw::Application, image: Option<PathBuf>) {
         ui
     });
     ui.window.present();
-    // While an operation runs, the main view is not shown or changed; an
-    // image opened then is not taken.
-    if let Some(path) = image
-        && ui.operation.borrow().is_none()
-    {
+    let Some(path) = image else {
+        return;
+    };
+    // While an operation runs, or its result is shown, the main view is not
+    // shown or changed: an image opened then is not taken (never queued),
+    // and a toast says why.
+    if ui.operation.borrow().is_none() {
         inspect(&ui, path);
+    } else if let Some(message) = open_refused(&ui) {
+        ui.toasts.add_toast(adw::Toast::new(message));
     }
+}
+
+// Why an image opened from outside is not taken now, from the operation's
+// own state: still processing (the operation, or Safe Removal), or showing
+// its result. `None` when neither (no operation, or one going straight back
+// to the main view).
+fn open_refused(ui: &Ui) -> Option<&'static str> {
+    if operation_running(ui) || removal_running(ui) {
+        return Some(text::open_refused(true));
+    }
+    let result_shown = ui.operation.borrow().as_ref().is_some_and(|operation| {
+        operation
+            .ended
+            .as_ref()
+            .is_some_and(|(ending, _)| result::case(*ending).is_some())
+    });
+    result_shown.then(|| text::open_refused(false))
 }
 
 fn build(app: &adw::Application) -> Rc<Ui> {
