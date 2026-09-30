@@ -134,7 +134,14 @@ struct OperationUi {
     note: gtk::Label,
     image: gtk::Label,
     target: gtk::Label,
+    // The three steps on the result view (one row each, room for the
+    // result's own words).
+    step_list: gtk::ListBox,
     steps: Vec<(adw::ActionRow, gtk::Image)>,
+    // The same steps while the operation runs, side by side:
+    // 準備 → 書き込み → 検証.
+    phases: gtk::Box,
+    phase_items: Vec<PhaseItem>,
     progress: gtk::ProgressBar,
     amount: gtk::Label,
     message: gtk::Label,
@@ -148,6 +155,15 @@ struct OperationUi {
     // The one row every result action sits in, side by side; hidden while
     // the operation runs.
     action_row: gtk::Box,
+}
+
+// One step in the running view's row: an icon, the step's name and its
+// state in words, named "<step>: <state>" for assistive technologies.
+struct PhaseItem {
+    item: gtk::Box,
+    name: &'static str,
+    icon: gtk::Image,
+    state: gtk::Label,
 }
 
 // The result view's Safe Removal section: one status row (a spinner while
@@ -1800,6 +1816,61 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         })
         .collect();
 
+    let phases = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .build();
+    let phase_items = STEPS
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            if index > 0 {
+                // Decoration only: the order is in the names' reading order.
+                let arrow = gtk::Image::builder()
+                    .icon_name("go-next-symbolic")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["dim-label"])
+                    .accessible_role(gtk::AccessibleRole::Presentation)
+                    .build();
+                phases.append(&arrow);
+            }
+            let name = text::step_name(*step);
+            let icon = gtk::Image::builder()
+                .accessible_role(gtk::AccessibleRole::Presentation)
+                .build();
+            let heading = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(6)
+                .halign(gtk::Align::Center)
+                .build();
+            heading.append(&icon);
+            heading.append(
+                &gtk::Label::builder()
+                    .label(name)
+                    .css_classes(["heading"])
+                    .build(),
+            );
+            let state = gtk::Label::builder()
+                .css_classes(["caption", "dim-label"])
+                .build();
+            let item = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(2)
+                .accessible_role(gtk::AccessibleRole::Group)
+                .build();
+            item.append(&heading);
+            item.append(&state);
+            phases.append(&item);
+            PhaseItem {
+                item,
+                name,
+                icon,
+                state,
+            }
+        })
+        .collect();
+
     let progress = gtk::ProgressBar::builder().show_text(true).build();
     let amount = centered(&["dim-label", "numeric"]);
     let message = centered(&[]);
@@ -1854,6 +1925,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         status_line.upcast_ref(),
         note.upcast_ref(),
         flow.upcast_ref(),
+        phases.upcast_ref(),
         step_list.upcast_ref(),
         progress.upcast_ref(),
         amount.upcast_ref(),
@@ -1933,7 +2005,10 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             note,
             image,
             target,
+            step_list,
             steps,
+            phases,
+            phase_items,
             progress,
             amount,
             message,
@@ -1968,11 +2043,21 @@ fn render_operation(ui: &Ui) {
         .as_ref()
         .and_then(|(ending, _)| result::view(*ending, tracker.verify_mode, &operation.removal));
 
+    // Running: the steps side by side; the result: one row each. Never both.
+    op.phases.set_visible(view.is_none());
+    op.step_list.set_visible(view.is_some());
     match &view {
         None => {
-            for ((row, icon), mark) in op.steps.iter().zip(tracker.marks()) {
-                row.set_subtitle(text::mark_label(mark));
-                icon.set_icon_name(Some(text::mark_icon(mark)));
+            for (phase, mark) in op.phase_items.iter().zip(tracker.marks()) {
+                let state = text::mark_label(mark);
+                phase.icon.set_icon_name(Some(text::mark_icon(mark)));
+                phase.state.set_text(state);
+                phase
+                    .item
+                    .update_property(&[gtk::accessible::Property::Label(&format!(
+                        "{}: {state}",
+                        phase.name
+                    ))]);
             }
         }
         Some(view) => {
