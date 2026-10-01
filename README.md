@@ -44,7 +44,7 @@ No official packages are published yet.
 - Linux with UDisks2
 - A polkit authentication agent (normally provided by the desktop environment)
 
-The current GUI is available in Japanese only.
+The GUI is available in English and Japanese.
 
 ## Installation
 
@@ -80,7 +80,7 @@ Full or None for them.
 ## Safe removal
 
 After writing, the result screen offers to prepare a supported USB drive for
-removal. This never happens automatically: you start it yourself. Linux USB
+removal. This never happens automatically: you start it yourself. Linux Image
 Writer unmounts the drive's filesystems if needed and then makes the drive
 ready to be unplugged. Only when this succeeds does it tell you that the drive
 can be safely removed.
