@@ -1,6 +1,6 @@
-<img src="data/icons/hicolor/scalable/apps/io.github.pc_freedom.LinuxUsbWriter.svg" width="96" alt="">
+<img src="data/icons/hicolor/scalable/apps/io.github.pc_freedom.linux-image-writer.svg" width="96" alt="">
 
-# Linux USB Writer
+# Linux Image Writer
 
 [日本語](README.ja.md)
 
@@ -10,7 +10,7 @@ A simple USB image writer for Linux, designed with safety in mind.
 
 ## Status
 
-Linux USB Writer is currently being developed toward its first release (v0.1).
+Linux Image Writer is currently being developed toward its first release (v0.1).
 No official packages are published yet.
 
 ## Features
@@ -114,21 +114,21 @@ Requirements:
 Build the GUI:
 
 ```sh
-cargo build --release --features gui --bin linux-usb-writer-gui
+cargo build --release --features gui --bin linux-image-writer
 ```
 
-The program is built as `target/release/linux-usb-writer-gui`.
+The program is built as `target/release/linux-image-writer`.
 
-The repository also contains `linux-usb-writer`, a command-line development
+The repository also contains `linux-image-writer-dev`, a command-line development
 and diagnostic tool. It includes destructive test modes and is not intended
 for general use.
 
 ## Reporting issues
 
 Please report bugs and suggestions on
-[GitHub Issues](https://github.com/PC-FREEDOM/linux-usb-writer/issues).
+[GitHub Issues](https://github.com/PC-FREEDOM/linux-image-writer/issues).
 
 ## License
 
-Linux USB Writer is licensed under the GNU General Public License v3.0 or
+Linux Image Writer is licensed under the GNU General Public License v3.0 or
 later (GPL-3.0-or-later). See [LICENSE](LICENSE).

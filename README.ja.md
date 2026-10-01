@@ -1,6 +1,6 @@
-<img src="data/icons/hicolor/scalable/apps/io.github.pc_freedom.LinuxUsbWriter.svg" width="96" alt="">
+<img src="data/icons/hicolor/scalable/apps/io.github.pc_freedom.linux-image-writer.svg" width="96" alt="">
 
-# Linux USB Writer
+# Linux Image Writer
 
 [English](README.md)
 
@@ -10,7 +10,7 @@ Linux 向けの、シンプルで安全性を重視した USB ディスクイメ
 
 ## 開発状況
 
-Linux USB Writer は現在、最初の正式リリース(v0.1)に向けて開発中です。
+Linux Image Writer は現在、最初の正式リリース(v0.1)に向けて開発中です。
 現時点では正式な配布パッケージはありません。
 
 ## 機能
@@ -99,17 +99,17 @@ gzip / xz で圧縮されたイメージでは、クイック検証は利用で�
 GUI のビルド:
 
 ```sh
-cargo build --release --features gui --bin linux-usb-writer-gui
+cargo build --release --features gui --bin linux-image-writer
 ```
 
-ビルドされたプログラムは `target/release/linux-usb-writer-gui` です。
+ビルドされたプログラムは `target/release/linux-image-writer` です。
 
-リポジトリには、コマンドラインの開発・診断用ツール `linux-usb-writer` も含まれています。破壊的なテストモードを含むため、一般の利用は想定していません。
+リポジトリには、コマンドラインの開発・診断用ツール `linux-image-writer-dev` も含まれています。破壊的なテストモードを含むため、一般の利用は想定していません。
 
 ## 不具合の報告
 
-不具合や要望は [GitHub Issues](https://github.com/PC-FREEDOM/linux-usb-writer/issues) にお寄せください。
+不具合や要望は [GitHub Issues](https://github.com/PC-FREEDOM/linux-image-writer/issues) にお寄せください。
 
 ## ライセンス
 
-Linux USB Writer は GNU General Public License v3.0 or later(GPL-3.0-or-later)のもとで提供されています。詳しくは [LICENSE](LICENSE) をご覧ください。
+Linux Image Writer は GNU General Public License v3.0 or later(GPL-3.0-or-later)のもとで提供されています。詳しくは [LICENSE](LICENSE) をご覧ください。

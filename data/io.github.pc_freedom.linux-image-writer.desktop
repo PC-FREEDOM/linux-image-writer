@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Linux USB Writer
+Name=Linux Image Writer
 Comment=Write disk images to USB drives
 Comment[ja]=ディスクイメージを USB ドライブに書き込みます
-Exec=linux-usb-writer-gui %U
-Icon=io.github.pc_freedom.LinuxUsbWriter
+Exec=linux-image-writer %U
+Icon=io.github.pc_freedom.linux-image-writer
 Terminal=false
 Categories=System;
 Keywords=USB;ISO;IMG;image;disk;flash;writer;bootable;

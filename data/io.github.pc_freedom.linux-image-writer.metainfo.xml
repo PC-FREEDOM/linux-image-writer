@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.pc_freedom.LinuxUsbWriter</id>
+  <id>io.github.pc_freedom.linux-image-writer</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
 
-  <name>Linux USB Writer</name>
+  <name>Linux Image Writer</name>
   <summary>Write disk images to USB drives</summary>
   <summary xml:lang="ja">ディスクイメージを USB ドライブに書き込みます</summary>
 
@@ -14,11 +14,11 @@
 
   <description>
     <p>
-      Linux USB Writer writes disk images to USB drives through a simple
+      Linux Image Writer writes disk images to USB drives through a simple
       graphical interface.
     </p>
     <p xml:lang="ja">
-      Linux USB Writer は、シンプルな画面でディスクイメージを USB ドライブに書き込むアプリです。
+      Linux Image Writer は、シンプルな画面でディスクイメージを USB ドライブに書き込むアプリです。
     </p>
     <ul>
       <li>Writes ISO and IMG images, as well as gzip and xz compressed images, which are decompressed while they are written</li>
@@ -34,14 +34,14 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">io.github.pc_freedom.LinuxUsbWriter.desktop</launchable>
+  <launchable type="desktop-id">io.github.pc_freedom.linux-image-writer.desktop</launchable>
 
-  <url type="homepage">https://github.com/PC-FREEDOM/linux-usb-writer</url>
-  <url type="bugtracker">https://github.com/PC-FREEDOM/linux-usb-writer/issues</url>
-  <url type="vcs-browser">https://github.com/PC-FREEDOM/linux-usb-writer</url>
+  <url type="homepage">https://github.com/PC-FREEDOM/linux-image-writer</url>
+  <url type="bugtracker">https://github.com/PC-FREEDOM/linux-image-writer/issues</url>
+  <url type="vcs-browser">https://github.com/PC-FREEDOM/linux-image-writer</url>
 
   <provides>
-    <binary>linux-usb-writer-gui</binary>
+    <binary>linux-image-writer</binary>
   </provides>
 
   <supports>

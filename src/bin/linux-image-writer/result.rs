@@ -9,7 +9,7 @@
 // out a `RemovalTarget` (`WriteWorker::removal_target`). The GUI never works
 // that out again from the outcome, the device or anything else.
 
-use linux_usb_writer::{SafeRemovalOutcome, VerifyMode};
+use linux_image_writer::{SafeRemovalOutcome, VerifyMode};
 
 use crate::model::{MainReturn, TargetReturn};
 use crate::operation::{Ending, Mark, Reason, STEPS, Step};
@@ -649,8 +649,8 @@ mod tests {
 
     // ---- Safe Removal (3b) ----
 
-    use linux_usb_writer::DeviceDisplay;
-    use linux_usb_writer::report::{
+    use linux_image_writer::DeviceDisplay;
+    use linux_image_writer::report::{
         AuthorizationDenial, RemovalActionError, RemovalStage, RemovalUnavailable,
         RemovalUnsupported, TargetChange,
     };

@@ -4,12 +4,12 @@
 // no system access. What must stay unreachable is checked by the
 // `compile_fail` doc tests in src/lib.rs.
 
-use linux_usb_writer::report::{
+use linux_image_writer::report::{
     AuthorizationDenial, CompressionFormat, DeviceSnapshot, FdMetadata, ImageSourceError,
     RemovalActionError, RemovalStage, RemovalUnavailable, RemovalUnsupported, SelectionState,
     TargetChange, UnsupportedCompression, VerifyTargetDiagnostics, WriteGateError,
 };
-use linux_usb_writer::{
+use linux_image_writer::{
     CancelHandle, CancelReason, CancelledAt, ConfirmationDecision, DeviceCandidate, DeviceDisplay,
     ImageAccess, ImageInfo, OperationError, OperationOutcome, RemovalTarget, SafeRemovalOutcome,
     Selectability, SubmitError, TargetRef, VerifyAvailability, VerifyMode, VerifyNotStarted,

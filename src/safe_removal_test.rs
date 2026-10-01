@@ -32,7 +32,7 @@ use crate::orchestration::outcome::{CancelledAt, OperationError, OperationOutcom
 use crate::orchestration::removal::{SafeRemovalOutcome, request_safe_removal};
 use crate::orchestration::worker::{WorkerEvent, WorkerMessage, spawn_write_worker};
 
-const USAGE: &str = "usage: cargo run --locked --bin linux-usb-writer -- safe-removal-test <image-path> <udisks2-block-object-path> [none|quick|full] [--pause-for-mount-setup]\n\
+const USAGE: &str = "usage: cargo run --locked --bin linux-image-writer-dev -- safe-removal-test <image-path> <udisks2-block-object-path> [none|quick|full] [--pause-for-mount-setup]\n\
      DESTRUCTIVE: writes the image to the device (after the typed confirmation),\n\
      then, only if you type 'remove', unmounts the drive's filesystems and powers it off.\n\
      --pause-for-mount-setup: before the 'remove' prompt, wait for Enter so a filesystem\n\

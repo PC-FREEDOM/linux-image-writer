@@ -9,11 +9,11 @@
 // `OperationOutcome`). This module maps those reports to what is shown, and
 // the user's answers (the final confirmation, Cancel) to what is sent back.
 
-use linux_usb_writer::report::{
+use linux_image_writer::report::{
     CompressionFormat, OpenDeviceError, PrepareImageError, SelectTargetError, SelectionState,
     TargetNotReady, VerifyFailureReason,
 };
-use linux_usb_writer::{
+use linux_image_writer::{
     CancelledAt, ConfirmationDecision, DeviceDisplay, OpenPurpose, OperationError,
     OperationOutcome, VerifyMode, VerifyNotStarted, WorkerEvent,
 };
@@ -459,7 +459,7 @@ fn failure(error: &OperationError) -> Ending {
         OperationError::ReaderOpen(_) => before(Step::Write, Reason::ImageUnreadable),
         OperationError::Write { failed, .. } => Ending::WriteFailed {
             reason: match failed.cause {
-                linux_usb_writer::report::WriteJobFailureCause::SourceChanged(_) => {
+                linux_image_writer::report::WriteJobFailureCause::SourceChanged(_) => {
                     Reason::ImageChangedDuringWrite
                 }
                 _ => Reason::WriteError,
@@ -479,7 +479,7 @@ fn failure(error: &OperationError) -> Ending {
                 VerifyNotStarted::TestPauseEnded => Reason::VerifyNotStarted,
                 VerifyNotStarted::TargetCheck { .. } => Reason::VerifyTargetChanged,
                 VerifyNotStarted::Start { error, .. } => match error {
-                    linux_usb_writer::report::VerifyStartError::DirectReadUnavailable(_) => {
+                    linux_image_writer::report::VerifyStartError::DirectReadUnavailable(_) => {
                         Reason::VerifyDirectReadUnavailable
                     }
                     _ => Reason::VerifyOpenFailed,
@@ -513,9 +513,9 @@ fn target_reason(not_ready: &TargetNotReady) -> Reason {
 }
 
 fn image_reason(error: &PrepareImageError) -> Reason {
-    use linux_usb_writer::report::{CompressedImageRejection, PreflightError};
+    use linux_image_writer::report::{CompressedImageRejection, PreflightError};
     match error {
-        PrepareImageError::Image(linux_usb_writer::report::ImageSourceError::Io(_)) => {
+        PrepareImageError::Image(linux_image_writer::report::ImageSourceError::Io(_)) => {
             Reason::ImageUnreadable
         }
         PrepareImageError::Image(_) => Reason::ImageRefused,
@@ -537,7 +537,7 @@ fn image_reason(error: &PrepareImageError) -> Reason {
 }
 
 fn open_reason(error: &OpenDeviceError) -> Reason {
-    use linux_usb_writer::report::AuthorizationDenial;
+    use linux_image_writer::report::AuthorizationDenial;
     match error {
         OpenDeviceError::NotAuthorized(AuthorizationDenial::Dismissed) => {
             Reason::AuthenticationCancelled
@@ -617,12 +617,12 @@ fn selection_state(state: &SelectionState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_usb_writer::report::{
+    use linux_image_writer::report::{
         Cancelled, CompressedImageRejection, Failed, PreflightError, PreflightProgress,
         VerifyCancelled, VerifyFailed, VerifyProgress, VerifySucceeded, WriteJobFailureCause,
         WriteProgress, WriteStage,
     };
-    use linux_usb_writer::{CancelReason, RiskLevel, SafetyAssessment};
+    use linux_image_writer::{CancelReason, RiskLevel, SafetyAssessment};
     use std::io;
 
     fn display() -> DeviceDisplay {
@@ -1025,9 +1025,9 @@ mod tests {
             }
         );
         let outcome = OperationOutcome::Failed(OperationError::WriteDeviceRejected {
-            error: linux_usb_writer::report::WriteGateError::OpenDeviceFailed,
+            error: linux_image_writer::report::WriteGateError::OpenDeviceFailed,
             open_device: Some(OpenDeviceError::NotAuthorized(
-                linux_usb_writer::report::AuthorizationDenial::Dismissed,
+                linux_image_writer::report::AuthorizationDenial::Dismissed,
             )),
         });
         assert_eq!(

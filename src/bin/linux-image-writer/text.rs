@@ -4,8 +4,8 @@
 
 use std::io;
 
-use linux_usb_writer::report::{CompressionFormat, ImageSourceError};
-use linux_usb_writer::{
+use linux_image_writer::report::{CompressionFormat, ImageSourceError};
+use linux_image_writer::{
     DeviceDisplay, ImageAccess, OpenPurpose, RiskLevel, RiskReason, VerifyMode,
     VerifyUnavailableReason, WorkerConfirmationRequest,
 };
@@ -732,8 +732,8 @@ pub fn confirmation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_usb_writer::report::UnsupportedCompression;
-    use linux_usb_writer::{DeviceDisplay, RiskLevel, SafetyAssessment};
+    use linux_image_writer::report::UnsupportedCompression;
+    use linux_image_writer::{DeviceDisplay, RiskLevel, SafetyAssessment};
 
     #[test]
     fn sizes_read_naturally() {

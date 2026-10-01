@@ -1,10 +1,10 @@
 [package]
-name = "linux-usb-writer"
+name = "linux-image-writer"
 version = "0.1.0"
 edition = "2024"
 description = "A simple and safety-focused USB image writer for Linux"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/PC-FREEDOM/linux-usb-writer"
+repository = "https://github.com/PC-FREEDOM/linux-image-writer"
 
 # The library (src/lib.rs) exposes only the Production API; every other
 # module is private to it. The CLI binary (src/main.rs) compiles the same
@@ -18,12 +18,18 @@ repository = "https://github.com/PC-FREEDOM/linux-usb-writer"
 path = "src/lib.rs"
 test = false
 
+# The development and diagnostic CLI (src/main.rs), named explicitly so it
+# never takes the package's name: that name is the Production GUI's.
+[[bin]]
+name = "linux-image-writer-dev"
+path = "src/main.rs"
+
 # The Production GUI (GTK4 + libadwaita). A separate binary that uses only
 # the library's public API, like any outside consumer; built only with
 # `--features gui`, so the CLI and the library never need GTK.
 [[bin]]
-name = "linux-usb-writer-gui"
-path = "src/bin/linux-usb-writer-gui/main.rs"
+name = "linux-image-writer"
+path = "src/bin/linux-image-writer/main.rs"
 required-features = ["gui"]
 
 [features]

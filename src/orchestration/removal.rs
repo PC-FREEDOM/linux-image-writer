@@ -114,7 +114,7 @@ pub enum RemovalStage {
     PowerOff,
 }
 
-/// Why this device is not removed by Linux USB Writer (v0.1 powers off only
+/// Why this device is not removed by Linux Image Writer (v0.1 powers off only
 /// a single, ordinary USB device).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemovalUnsupported {

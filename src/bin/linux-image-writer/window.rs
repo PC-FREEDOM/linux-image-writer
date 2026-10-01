@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use linux_usb_writer::report::ImageSourceError;
-use linux_usb_writer::{
+use linux_image_writer::report::ImageSourceError;
+use linux_image_writer::{
     CandidateListError, ConfirmationDecision, DeviceCandidate, ImageInfo, OperationOutcome,
     RemovalTarget, TargetRef, VerifyAvailability, VerifyMode, WorkerConfirmationRequest,
     WorkerMessage, WriteOperationRequest, WriteWorker, inspect_image, list_candidates,
@@ -321,7 +321,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Linux USB Writer")
+        .title("Linux Image Writer")
         .default_width(600)
         .default_height(680)
         .content(&toasts)

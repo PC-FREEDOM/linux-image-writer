@@ -1,4 +1,4 @@
-# Production Flatpak manifest for Linux USB Writer (local development
+# Production Flatpak manifest for Linux Image Writer (local development
 # builds: the source is this repository's working tree).
 #
 # Only the GUI is built and installed; the diagnostic CLI is not.
@@ -9,13 +9,13 @@
 # Cargo builds offline from cargo-sources.json, generated from Cargo.lock by
 # flatpak-builder-tools' flatpak-cargo-generator.py. Regenerate it whenever
 # Cargo.lock changes.
-app-id: io.github.pc_freedom.LinuxUsbWriter
+app-id: io.github.pc_freedom.linux-image-writer
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: linux-usb-writer-gui
+command: linux-image-writer
 finish-args:
   - --share=ipc
   - --socket=wayland
@@ -25,18 +25,18 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 modules:
-  - name: linux-usb-writer
+  - name: linux-image-writer
     buildsystem: simple
     build-options:
       env:
-        CARGO_HOME: /run/build/linux-usb-writer/cargo
+        CARGO_HOME: /run/build/linux-image-writer/cargo
         CARGO_NET_OFFLINE: 'true'
     build-commands:
-      - cargo --offline build --release --locked --features gui --bin linux-usb-writer-gui
-      - install -Dm755 target/release/linux-usb-writer-gui -t /app/bin/
-      - install -Dm644 data/io.github.pc_freedom.LinuxUsbWriter.desktop -t /app/share/applications/
-      - install -Dm644 data/io.github.pc_freedom.LinuxUsbWriter.metainfo.xml -t /app/share/metainfo/
-      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.pc_freedom.LinuxUsbWriter.svg
+      - cargo --offline build --release --locked --features gui --bin linux-image-writer
+      - install -Dm755 target/release/linux-image-writer -t /app/bin/
+      - install -Dm644 data/io.github.pc_freedom.linux-image-writer.desktop -t /app/share/applications/
+      - install -Dm644 data/io.github.pc_freedom.linux-image-writer.metainfo.xml -t /app/share/metainfo/
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.pc_freedom.linux-image-writer.svg
         -t /app/share/icons/hicolor/scalable/apps/
     sources:
       - type: dir

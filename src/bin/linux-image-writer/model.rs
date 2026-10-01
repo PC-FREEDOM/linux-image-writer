@@ -11,7 +11,7 @@
 // "Write" being enabled authorizes nothing: the operation re-checks
 // everything itself when it runs.
 
-use linux_usb_writer::{DeviceCandidate, RiskReason, TargetRef, VerifyAvailability, VerifyMode};
+use linux_image_writer::{DeviceCandidate, RiskReason, TargetRef, VerifyAvailability, VerifyMode};
 
 // ---- Target selection ----
 
@@ -493,7 +493,7 @@ pub fn write_readiness(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_usb_writer::{ImageInfo, inspect_image};
+    use linux_image_writer::{ImageInfo, inspect_image};
 
     // A list entry whose identity answers stand in for the library's: the
     // same `device` and `instance` means "same device and instance" -- the

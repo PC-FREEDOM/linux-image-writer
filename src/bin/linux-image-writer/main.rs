@@ -1,4 +1,4 @@
-// Linux USB Writer's GUI (GTK4 + libadwaita).
+// Linux Image Writer's GUI (GTK4 + libadwaita).
 //
 // A consumer of the library's Production API only: the device list and its
 // Safety Engine verdicts (`list_candidates`), the identity check across
@@ -20,7 +20,7 @@
 // re-checks, unmounts and powers off by itself; this program shows its
 // outcome.
 //
-//   linux-usb-writer-gui [image]   (an image given here is inspected at start)
+//   linux-image-writer [image]   (an image given here is inspected at start)
 
 mod expansion;
 mod model;
@@ -35,7 +35,7 @@ use gtk::{gio, glib};
 // The canonical application ID (GitHub account PC-FREEDOM, the hyphen
 // written as an underscore). The desktop entry, AppStream metainfo, icon
 // name and Flatpak manifest use the same ID.
-const APP_ID: &str = "io.github.pc_freedom.LinuxUsbWriter";
+const APP_ID: &str = "io.github.pc_freedom.linux-image-writer";
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder()

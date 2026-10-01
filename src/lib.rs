@@ -1,4 +1,4 @@
-//! Linux USB Writer's Production API: write an image to a removable USB
+//! Linux Image Writer's Production API: write an image to a removable USB
 //! device through the one safe sequence the CLI's `write-test` uses, from a
 //! thread of its own.
 //!
@@ -32,12 +32,12 @@
 //! below that describe what happened (the outcome's errors and diagnostics)
 //! are read-only data: no function of this API takes them as input.
 //!
-//! The `linux-usb-writer` CLI binary compiles the same modules itself
+//! The `linux-image-writer-dev` CLI binary compiles the same modules itself
 //! (see `Cargo.toml`), so its diagnostic modes can use internals that this
 //! library does not expose.
 //!
 //! ```no_run
-//! use linux_usb_writer::{
+//! use linux_image_writer::{
 //!     ConfirmationDecision, VerifyAvailability, VerifyMode, WorkerMessage, WriteOperationRequest,
 //!     inspect_image, list_candidates, spawn_write_worker,
 //! };
@@ -75,40 +75,40 @@
 //!
 //! ```compile_fail,E0603
 //! // No confirmation token, Write Gate or device open outside the operation.
-//! use linux_usb_writer::execution::core::ConfirmationToken;
+//! use linux_image_writer::execution::core::ConfirmationToken;
 //! ```
 //!
 //! ```compile_fail,E0603
-//! use linux_usb_writer::execution::linux_access::open_device;
+//! use linux_image_writer::execution::linux_access::open_device;
 //! ```
 //!
 //! ```compile_fail,E0603
 //! // The image source is built and used inside the operation only.
-//! use linux_usb_writer::image_source::SelectedImage;
+//! use linux_image_writer::image_source::SelectedImage;
 //! ```
 //!
 //! ```compile_fail,E0603
 //! // The synchronous sequence, its observer and its platform seam are not
 //! // public; the worker is the entry point.
-//! use linux_usb_writer::orchestration::operation::run_write_operation;
+//! use linux_image_writer::orchestration::operation::run_write_operation;
 //! ```
 //!
 //! ```compile_fail,E0624
 //! // A target reference comes only from the candidate list: the CLI's
 //! // block-path reference is not part of this API.
-//! let target = linux_usb_writer::TargetRef::from_block_path("/org/freedesktop/UDisks2/block_devices/sda");
+//! let target = linux_image_writer::TargetRef::from_block_path("/org/freedesktop/UDisks2/block_devices/sda");
 //! ```
 //!
 //! ```compile_fail,E0451
 //! // A removal target cannot be assembled: its anchor is private.
-//! fn forge() -> linux_usb_writer::RemovalTarget {
-//!     linux_usb_writer::RemovalTarget { anchor: todo!() }
+//! fn forge() -> linux_image_writer::RemovalTarget {
+//!     linux_image_writer::RemovalTarget { anchor: todo!() }
 //! }
 //! ```
 //!
 //! ```compile_fail,E0616
 //! // Nor read: the device snapshot it holds is not reachable.
-//! fn peek(target: &linux_usb_writer::RemovalTarget) {
+//! fn peek(target: &linux_image_writer::RemovalTarget) {
 //!     let _ = &target.anchor;
 //! }
 //! ```
@@ -116,54 +116,54 @@
 //! ```compile_fail,E0624
 //! // Only the write operation builds one, from the snapshot its write FD was
 //! // bound to; that constructor is not part of this API.
-//! fn forge(snapshot: linux_usb_writer::report::DeviceSnapshot) -> linux_usb_writer::RemovalTarget {
-//!     linux_usb_writer::RemovalTarget::from_bound_snapshot(snapshot)
+//! fn forge(snapshot: linux_image_writer::report::DeviceSnapshot) -> linux_image_writer::RemovalTarget {
+//!     linux_image_writer::RemovalTarget::from_bound_snapshot(snapshot)
 //! }
 //! ```
 //!
 //! ```compile_fail,E0277
 //! // No device path turns into one.
-//! let target: linux_usb_writer::RemovalTarget = "/dev/sda".into();
+//! let target: linux_image_writer::RemovalTarget = "/dev/sda".into();
 //! ```
 //!
 //! ```compile_fail,E0277
 //! // Nor does a target reference from the device list.
-//! fn forge(target: linux_usb_writer::TargetRef) -> linux_usb_writer::RemovalTarget {
+//! fn forge(target: linux_image_writer::TargetRef) -> linux_image_writer::RemovalTarget {
 //!     target.into()
 //! }
 //! ```
 //!
 //! ```compile_fail,E0308
 //! // Safe removal takes a removal target, never a device-list reference.
-//! fn remove(target: &linux_usb_writer::TargetRef) {
-//!     let _ = linux_usb_writer::request_safe_removal(target);
+//! fn remove(target: &linux_image_writer::TargetRef) {
+//!     let _ = linux_image_writer::request_safe_removal(target);
 //! }
 //! ```
 //!
 //! ```compile_fail,E0432
 //! // What safe removal reads and plans stays inside the crate.
-//! use linux_usb_writer::report::RemovalFacts;
+//! use linux_image_writer::report::RemovalFacts;
 //! ```
 //!
 //! ```compile_fail,E0432
-//! use linux_usb_writer::RemovalPlan;
+//! use linux_image_writer::RemovalPlan;
 //! ```
 //!
 //! ```compile_fail,E0451
 //! // A request cannot be assembled from its fields.
-//! fn forge(target: linux_usb_writer::TargetRef) -> linux_usb_writer::WriteOperationRequest {
-//!     linux_usb_writer::WriteOperationRequest {
+//! fn forge(target: linux_image_writer::TargetRef) -> linux_image_writer::WriteOperationRequest {
+//!     linux_image_writer::WriteOperationRequest {
 //!         target,
 //!         image_path: String::new(),
-//!         verify_mode: linux_usb_writer::VerifyMode::Full,
+//!         verify_mode: linux_image_writer::VerifyMode::Full,
 //!     }
 //! }
 //! ```
 //!
 //! ```compile_fail,E0451
 //! // An image description is only produced by `inspect_image`.
-//! fn forge() -> linux_usb_writer::ImageInfo {
-//!     linux_usb_writer::ImageInfo {
+//! fn forge() -> linux_image_writer::ImageInfo {
+//!     linux_image_writer::ImageInfo {
 //!         file_size: 0,
 //!         compression: None,
 //!         access: todo!(),
@@ -176,16 +176,16 @@
 //! // An image description is not an input to a write: a request names the
 //! // image by path, and the operation opens and checks it itself.
 //! fn request(
-//!     target: linux_usb_writer::TargetRef,
-//!     info: linux_usb_writer::ImageInfo,
-//! ) -> linux_usb_writer::WriteOperationRequest {
-//!     linux_usb_writer::WriteOperationRequest::new(target, info, linux_usb_writer::VerifyMode::Full)
+//!     target: linux_image_writer::TargetRef,
+//!     info: linux_image_writer::ImageInfo,
+//! ) -> linux_image_writer::WriteOperationRequest {
+//!     linux_image_writer::WriteOperationRequest::new(target, info, linux_image_writer::VerifyMode::Full)
 //! }
 //! ```
 //!
 //! ```compile_fail,E0599
 //! // Nor is it an image source: it cannot be read.
-//! fn read(info: &linux_usb_writer::ImageInfo) {
+//! fn read(info: &linux_image_writer::ImageInfo) {
 //!     let _ = info.open_reader();
 //! }
 //! ```
@@ -194,7 +194,7 @@
 //! // A selection generation (what a selection's authority rests on) cannot
 //! // be minted outside the crate, so a `SelectionState::Selected` cannot be
 //! // forged -- and nothing here would accept one anyway.
-//! let generation = linux_usb_writer::report::SelectionGeneration(1);
+//! let generation = linux_image_writer::report::SelectionGeneration(1);
 //! ```
 
 // The implementation. Every module is private: only the re-exports below
