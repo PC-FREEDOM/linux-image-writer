@@ -55,6 +55,25 @@
     <color type="primary">#FFCC00</color>
   </branding>
 
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/PC-FREEDOM/linux-image-writer/8530e859e24f0e6325490e501dd1f5ffda114734/screenshots/01-main-light.png</image>
+      <caption>Select an image, USB drive, and verification method</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/PC-FREEDOM/linux-image-writer/8530e859e24f0e6325490e501dd1f5ffda114734/screenshots/02-writing.png</image>
+      <caption>Write the image to a USB drive with clear progress</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/PC-FREEDOM/linux-image-writer/8530e859e24f0e6325490e501dd1f5ffda114734/screenshots/03-result-success.png</image>
+      <caption>Confirm that writing and verification completed successfully</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/PC-FREEDOM/linux-image-writer/8530e859e24f0e6325490e501dd1f5ffda114734/screenshots/04-main-dark.png</image>
+      <caption>Use Linux Image Writer with the dark style</caption>
+    </screenshot>
+  </screenshots>
+
   <releases>
     <release version="0.1.0" date="2026-10-01">
       <description>
