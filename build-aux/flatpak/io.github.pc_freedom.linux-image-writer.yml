@@ -9,6 +9,11 @@
 # Cargo builds offline from cargo-sources.json, generated from Cargo.lock by
 # flatpak-builder-tools' flatpak-cargo-generator.py. Regenerate it whenever
 # Cargo.lock changes.
+#
+# Translations (po/<language>.po, the languages in po/LINGUAS) are compiled
+# into /app/share/locale. flatpak-builder moves them into the app's .Locale
+# extension, which Flatpak installs for the user's configured languages; a
+# single-file bundle of the app alone does not include them.
 app-id: io.github.pc_freedom.linux-image-writer
 runtime: org.gnome.Platform
 runtime-version: '51'
@@ -38,6 +43,9 @@ modules:
       - install -Dm644 data/io.github.pc_freedom.linux-image-writer.metainfo.xml -t /app/share/metainfo/
       - install -Dm644 data/icons/hicolor/scalable/apps/io.github.pc_freedom.linux-image-writer.svg
         -t /app/share/icons/hicolor/scalable/apps/
+      - for lang in $(cat po/LINGUAS); do install -d /app/share/locale/$lang/LC_MESSAGES
+        && msgfmt --check -o /app/share/locale/$lang/LC_MESSAGES/linux-image-writer.mo po/$lang.po
+        || exit 1; done
     sources:
       - type: dir
         path: ../..

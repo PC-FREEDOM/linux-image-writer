@@ -33,12 +33,14 @@ path = "src/bin/linux-image-writer/main.rs"
 required-features = ["gui"]
 
 [features]
-gui = ["dep:adw", "dep:gtk"]
+gui = ["dep:adw", "dep:gettext-rs", "dep:gtk"]
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.9.2", features = ["v1_5"], optional = true }
 ctrlc = "3.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend", "runtime_detection"] }
+# The GUI's translations, through the C library's own gettext.
+gettext-rs = { version = "0.8.0", features = ["gettext-system"], optional = true }
 gtk = { package = "gtk4", version = "0.11.5", features = ["v4_12"], optional = true }
 libc = "0.2.189"
 liblzma = { version = "0.4.8", features = ["static"] }

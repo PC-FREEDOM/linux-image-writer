@@ -1,6 +1,8 @@
 // What the GUI says, in words: the library's typed answers turned into
-// short Japanese text for the normal view, and their exact names for the
-// technical details. Presentation only -- every decision is the library's.
+// short text for the normal view (written in English and translated with
+// gettext, see `i18n`), and their exact names for the technical details,
+// which stay untranslated. Presentation only -- every decision is the
+// library's.
 
 use std::io;
 
@@ -10,17 +12,26 @@ use linux_image_writer::{
     VerifyUnavailableReason, WorkerConfirmationRequest,
 };
 
+use crate::i18n::{fill, ntr, tr};
 use crate::model::{ClearReason, NoAvailableTarget, VerifyNotice, WriteBlocker};
 use crate::operation::{Activity, Mark, Reason, Step, Tracker};
 use crate::result::{RemovalNotice, RemovalStatus, ResultAction, ResultCase, ResultKind, StepLine};
 
 // ---- Sizes ----
 
+// A count of bytes, in words ("512 bytes").
+fn bytes_text(count: u64, digits: &str) -> String {
+    fill(
+        ntr("{bytes} byte", "{bytes} bytes", count),
+        &[("bytes", digits)],
+    )
+}
+
 // A size as people read it (SI units, one decimal place).
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["KB", "MB", "GB", "TB", "PB"];
     if bytes < 1000 {
-        return format!("{bytes} バイト");
+        return bytes_text(bytes, &bytes.to_string());
     }
     let mut value = bytes as f64 / 1000.0;
     let mut unit = 0;
@@ -36,7 +47,10 @@ pub fn size(bytes: u64) -> String {
 pub fn transfer(done: u64, total: u64) -> String {
     const UNITS: [&str; 5] = ["KB", "MB", "GB", "TB", "PB"];
     if total < 1000 {
-        return format!("{done} / {total} バイト");
+        return fill(
+            ntr("{done} / {total} byte", "{done} / {total} bytes", total),
+            &[("done", &done.to_string()), ("total", &total.to_string())],
+        );
     }
     let mut divisor = 1000.0;
     let mut unit = 0;
@@ -62,16 +76,16 @@ pub fn exact_bytes(bytes: u64) -> String {
         }
         grouped.push(digit);
     }
-    format!("{grouped} バイト")
+    bytes_text(bytes, &grouped)
 }
 
 // ---- Image ----
 
-pub fn image_kind(compression: Option<CompressionFormat>) -> &'static str {
+pub fn image_kind(compression: Option<CompressionFormat>) -> String {
     match compression {
-        None => "非圧縮イメージ",
-        Some(CompressionFormat::Gzip) => "GZIP 圧縮イメージ",
-        Some(CompressionFormat::Xz) => "XZ 圧縮イメージ",
+        None => tr("Uncompressed image"),
+        Some(CompressionFormat::Gzip) => tr("GZIP-compressed image"),
+        Some(CompressionFormat::Xz) => tr("XZ-compressed image"),
     }
 }
 
@@ -94,20 +108,20 @@ pub fn access_name(access: ImageAccess) -> &'static str {
 pub fn image_error(error: &ImageSourceError) -> String {
     match error {
         ImageSourceError::Io(error) => match error.kind() {
-            io::ErrorKind::NotFound => "ファイルが見つかりません".to_string(),
-            io::ErrorKind::PermissionDenied => "ファイルを読み取る権限がありません".to_string(),
-            _ => "ファイルを読み取れませんでした".to_string(),
+            io::ErrorKind::NotFound => tr("File not found"),
+            io::ErrorKind::PermissionDenied => tr("No permission to read the file"),
+            _ => tr("The file could not be read"),
         },
         ImageSourceError::NotRegularFile => {
-            "通常のファイルではありません（フォルダーやデバイスは選べません）".to_string()
+            tr("Not a regular file (folders and devices cannot be chosen)")
         }
-        ImageSourceError::UnsupportedFormat(kind) => format!(
-            "{} 形式の圧縮ファイルには対応していません",
-            kind.name().to_uppercase()
+        ImageSourceError::UnsupportedFormat(kind) => fill(
+            tr("{format}-compressed files are not supported"),
+            &[("format", &kind.name().to_uppercase())],
         ),
-        ImageSourceError::ExtensionMismatch { expected } => format!(
-            "ファイル名は {} 圧縮を示していますが、内容が一致しません",
-            expected.name().to_uppercase()
+        ImageSourceError::ExtensionMismatch { expected } => fill(
+            tr("The file name indicates {format} compression, but the contents do not match"),
+            &[("format", &expected.name().to_uppercase())],
         ),
     }
 }
@@ -116,7 +130,7 @@ pub fn image_error(error: &ImageSourceError) -> String {
 
 pub fn bus(connection_bus: &str) -> String {
     match connection_bus {
-        "" => "接続方式不明".to_string(),
+        "" => tr("Unknown connection"),
         "usb" => "USB".to_string(),
         other => other.to_uppercase(),
     }
@@ -131,44 +145,45 @@ pub fn device_name(vendor: &str, model: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if name.is_empty() {
-        "名前のないデバイス".to_string()
+        tr("Unnamed device")
     } else {
         name
     }
 }
 
-pub fn risk_reason(reason: &RiskReason) -> &'static str {
+// One reason, as a sentence.
+fn risk_reason(reason: &RiskReason) -> String {
     match reason {
-        RiskReason::SystemDevice => "システムのディスクです",
-        RiskReason::CriticalMount => "システム領域（/ や /boot など）が使用しています",
-        RiskReason::ActiveSwap => "スワップとして使用中です",
-        RiskReason::ComplexStorage => "LVM・RAID・暗号化などの構成に含まれています",
-        RiskReason::MountedFilesystem => "マウントされています",
-        RiskReason::ReadOnly => "読み取り専用です",
-        RiskReason::IgnoredBySystem => "システムが非表示に設定しています",
-        RiskReason::NotPartitionable => "パーティションを作成できないデバイスです",
-        RiskReason::UsbRemovable => "USB のリムーバブルデバイスです",
-        RiskReason::UnknownOrNonRemovable => "USB のリムーバブルデバイスと確認できません",
-        RiskReason::MediaUnavailable => "メディアが挿入されていません",
+        RiskReason::SystemDevice => tr("It is a system disk."),
+        RiskReason::CriticalMount => tr("It is in use by the system (/, /boot or similar)."),
+        RiskReason::ActiveSwap => tr("It is in use as swap."),
+        RiskReason::ComplexStorage => tr("It is part of an LVM, RAID or encrypted setup."),
+        RiskReason::MountedFilesystem => tr("It is mounted."),
+        RiskReason::ReadOnly => tr("It is read-only."),
+        RiskReason::IgnoredBySystem => tr("The system has set it to be hidden."),
+        RiskReason::NotPartitionable => tr("It is a device that cannot be partitioned."),
+        RiskReason::UsbRemovable => tr("It is a removable USB device."),
+        RiskReason::UnknownOrNonRemovable => {
+            tr("It could not be confirmed to be a removable USB device.")
+        }
+        RiskReason::MediaUnavailable => tr("No media is inserted."),
     }
 }
 
 // Why a protected device cannot be chosen: the Safety Engine's reasons as
 // sentences, except the informational one a selectable device also carries.
 pub fn protection(reasons: &[RiskReason]) -> String {
-    let explained: Vec<&str> = reasons
+    reasons
         .iter()
         .filter(|reason| !matches!(reason, RiskReason::UsbRemovable))
         .map(risk_reason)
-        .collect();
-    if explained.is_empty() {
-        "安全のため選択できません。".to_string()
-    } else {
-        explained
-            .iter()
-            .map(|sentence| format!("{sentence}。"))
-            .collect()
-    }
+        .reduce(|sentences, next| {
+            fill(
+                tr("{sentences} {next_sentence}"),
+                &[("sentences", &sentences), ("next_sentence", &next)],
+            )
+        })
+        .unwrap_or_else(|| tr("It cannot be chosen, for safety."))
 }
 
 pub fn risk_level_name(level: &RiskLevel) -> &'static str {
@@ -182,19 +197,19 @@ pub fn risk_level_name(level: &RiskLevel) -> &'static str {
 // What the target section says when no drive can be chosen (title, line
 // under it). Never a promise that a drive will become selectable: the
 // Safety Engine decides that again on the next refresh.
-pub fn no_available_target(state: NoAvailableTarget) -> (&'static str, &'static str) {
+pub fn no_available_target(state: NoAvailableTarget) -> (String, String) {
     match state {
         NoAvailableTarget::NoUsb => (
-            "USB ドライブが見つかりません",
-            "書き込み先の USB ドライブを接続してください",
+            tr("No USB drive found"),
+            tr("Connect the USB drive to write to"),
         ),
         NoAvailableTarget::UsbInUse => (
-            "接続されている USB ドライブは使用中のため選べません",
-            "ファイルマネージャーでマウントを解除してから、もう一度お試しください",
+            tr("The connected USB drive is in use and cannot be chosen"),
+            tr("Unmount it in your file manager, then try again"),
         ),
         NoAvailableTarget::UsbProtected => (
-            "接続されている USB ドライブは書き込み先に選べません",
-            "理由は「保護されているデバイス」で確認できます",
+            tr("The connected USB drive cannot be chosen as the target"),
+            tr("See “Protected devices” for the reason"),
         ),
     }
 }
@@ -202,82 +217,84 @@ pub fn no_available_target(state: NoAvailableTarget) -> (&'static str, &'static 
 // Why an image opened from outside (e.g. "Open with") was not taken:
 // `processing` while the operation or Safe Removal runs, otherwise while its
 // result is shown. The image stays as it was; nothing is queued.
-pub fn open_refused(processing: bool) -> &'static str {
+pub fn open_refused(processing: bool) -> String {
     if processing {
-        "処理中のため、別のイメージは開けません。処理が終わってから、もう一度お試しください"
+        tr("Another image cannot be opened while processing. Try again once it has finished")
     } else {
-        "結果画面を閉じてから、もう一度お試しください"
+        tr("Close the result view, then try again")
     }
 }
 
 // The detail (`CandidateListError`) goes to the technical details.
-pub fn candidate_list_error_message() -> &'static str {
-    "デバイスの一覧を取得できませんでした"
+pub fn candidate_list_error_message() -> String {
+    tr("The device list could not be read")
 }
 
 // Why the selection was cleared, when it needs saying. Choosing another
 // drive was the user's own request: the empty selection says it all.
-pub fn clear_reason(reason: ClearReason) -> Option<&'static str> {
+pub fn clear_reason(reason: ClearReason) -> Option<String> {
     match reason {
-        ClearReason::Disappeared => Some(
-            "選択していた USB ドライブが見つからなくなりました。書き込み先を選び直してください。",
-        ),
-        ClearReason::NoLongerSelectable => {
-            Some("選択していた USB ドライブは現在選択できません。書き込み先を選び直してください。")
-        }
-        ClearReason::TooSmall => Some(
-            "選択していた USB ドライブはこのイメージには容量が足りません。書き込み先を選び直してください。",
-        ),
+        ClearReason::Disappeared => Some(tr(
+            "The selected USB drive can no longer be found. Choose the target again.",
+        )),
+        ClearReason::NoLongerSelectable => Some(tr(
+            "The selected USB drive cannot be chosen at the moment. Choose the target again.",
+        )),
+        ClearReason::TooSmall => Some(tr(
+            "The selected USB drive is too small for this image. Choose the target again.",
+        )),
         ClearReason::ChooseAnother => None,
     }
 }
 
 // ---- Verify ----
 
-pub fn verify_title(mode: VerifyMode) -> &'static str {
+pub fn verify_title(mode: VerifyMode) -> String {
     match mode {
-        VerifyMode::Quick => "クイック検証",
-        VerifyMode::Full => "完全検証",
-        VerifyMode::None => "検証なし",
+        VerifyMode::Quick => tr("Quick verification"),
+        VerifyMode::Full => tr("Full verification"),
+        VerifyMode::None => tr("No verification"),
     }
 }
 
-pub fn verify_description(mode: VerifyMode) -> &'static str {
+pub fn verify_description(mode: VerifyMode) -> String {
     match mode {
-        VerifyMode::Quick => "書き込み後、一部を読み戻して確認します。",
-        VerifyMode::Full => {
-            "書き込んだデータをすべて読み戻して確認します。\nクイック検証より時間がかかります。"
-        }
-        VerifyMode::None => "書き込み後の読み戻し確認は行われません。",
+        VerifyMode::Quick => tr("After writing, part of the data is read back and checked."),
+        VerifyMode::Full => tr(
+            "All of the written data is read back and checked.\nThis takes longer than quick verification.",
+        ),
+        VerifyMode::None => tr("The written data is not read back and checked."),
     }
 }
 
 // The one explanation shown under the Verify choices: the selected mode's,
 // once an image is known.
-pub fn verify_help(image_ready: bool, selected: VerifyMode) -> Option<&'static str> {
+pub fn verify_help(image_ready: bool, selected: VerifyMode) -> Option<String> {
     image_ready.then(|| verify_description(selected))
 }
 
 // Next to a mode the image does not allow.
-pub fn verify_unavailable_short(reason: VerifyUnavailableReason) -> &'static str {
+pub fn verify_unavailable_short(reason: VerifyUnavailableReason) -> String {
     match reason {
-        VerifyUnavailableReason::NeedsRandomAccess => "このイメージでは利用できません",
+        VerifyUnavailableReason::NeedsRandomAccess => tr("Not available for this image"),
     }
 }
 
 // Why (tooltip and accessible description of that mode).
-pub fn verify_unavailable(reason: VerifyUnavailableReason) -> &'static str {
+pub fn verify_unavailable(reason: VerifyUnavailableReason) -> String {
     match reason {
-        VerifyUnavailableReason::NeedsRandomAccess => {
-            "この形式のイメージは任意の位置から読み取れないため、一部を読み戻すクイック検証は利用できません"
-        }
+        VerifyUnavailableReason::NeedsRandomAccess => tr(
+            "Images in this format cannot be read from an arbitrary position, so quick verification, which reads back parts of the image, is not available",
+        ),
     }
 }
 
 // What "available" means (technical details): a format check, not a
 // promise that Verify will succeed on the device.
-pub fn verify_availability_note() -> &'static str {
-    "イメージの形式による判定です。検証そのものは、実行時にデバイスの状態によって失敗することがあります"
+pub fn verify_availability_note() -> String {
+    tr(
+        "Based on the image format. Verification itself can still fail when it runs, depending on the state of the device",
+    )
 }
 
 pub fn verify_unavailable_name(reason: VerifyUnavailableReason) -> &'static str {
@@ -287,50 +304,58 @@ pub fn verify_unavailable_name(reason: VerifyUnavailableReason) -> &'static str 
 }
 
 pub fn verify_notice(notice: VerifyNotice) -> String {
-    format!(
-        "このイメージでは{}を利用できないため、{}に変更しました",
-        verify_title(notice.wanted),
-        verify_title(notice.used)
+    fill(
+        tr("{wanted} is not available for this image, so it was changed to {used}"),
+        &[
+            ("wanted", &verify_title(notice.wanted)),
+            ("used", &verify_title(notice.used)),
+        ],
     )
 }
 
 // ---- Write ----
 
+// How much more capacity a drive would need.
+pub fn shortfall(missing: u64) -> String {
+    fill(
+        tr("Not enough capacity: {size} more is needed"),
+        &[("size", &size(missing))],
+    )
+}
+
 pub fn write_blocker(blocker: WriteBlocker) -> String {
     match blocker {
-        WriteBlocker::NoImage => "書き込むイメージを選択してください".to_string(),
-        WriteBlocker::ImageInspecting => "イメージを確認しています…".to_string(),
-        WriteBlocker::ImageInvalid => "このイメージは書き込めません".to_string(),
+        WriteBlocker::NoImage => tr("Choose an image to write"),
+        WriteBlocker::ImageInspecting => tr("Checking the image…"),
+        WriteBlocker::ImageInvalid => tr("This image cannot be written"),
         WriteBlocker::DeviceListUnavailable => {
-            "デバイスの一覧を取得できないため、書き込み先を確認できません".to_string()
+            tr("The device list could not be read, so the target cannot be checked")
         }
-        WriteBlocker::NoTarget => "書き込み先の USB ドライブを選択してください".to_string(),
-        WriteBlocker::VerifyUnavailable => "この検証方法は利用できません".to_string(),
-        WriteBlocker::TooSmall { shortfall } => {
-            format!("容量が {} 不足しています", size(shortfall))
-        }
+        WriteBlocker::NoTarget => tr("Choose the USB drive to write to"),
+        WriteBlocker::VerifyUnavailable => tr("This verification mode is not available"),
+        WriteBlocker::TooSmall { shortfall: missing } => shortfall(missing),
     }
 }
 
 // ---- The operation ----
 
-pub fn step_name(step: Step) -> &'static str {
+pub fn step_name(step: Step) -> String {
     match step {
-        Step::Prepare => "準備",
-        Step::Write => "書き込み",
-        Step::Verify => "検証",
+        Step::Prepare => tr("Prepare"),
+        Step::Write => tr("Write"),
+        Step::Verify => tr("Verify"),
     }
 }
 
-pub fn mark_label(mark: Mark) -> &'static str {
+pub fn mark_label(mark: Mark) -> String {
     match mark {
-        Mark::Waiting => "待機中",
-        Mark::Active => "実行中",
-        Mark::Done => "完了",
-        // Under the step's own name ("検証"), as on the result view.
-        Mark::Skipped => "なし",
-        Mark::Cancelled => "中止",
-        Mark::Failed => "失敗",
+        Mark::Waiting => tr("Waiting"),
+        Mark::Active => tr("Running"),
+        Mark::Done => tr("Done"),
+        // Under the step's own name ("Verify"), as on the result view.
+        Mark::Skipped => tr("None"),
+        Mark::Cancelled => tr("Cancelled"),
+        Mark::Failed => tr("Failed"),
     }
 }
 
@@ -348,66 +373,76 @@ pub fn mark_icon(mark: Mark) -> &'static str {
 }
 
 // The operation view's heading while it runs.
-pub fn headline(step: Step) -> &'static str {
+pub fn headline(step: Step) -> String {
     match step {
-        Step::Prepare => "書き込みを準備しています",
-        Step::Write => "USB に書き込んでいます",
-        Step::Verify => "書き込んだデータを確認しています",
+        Step::Prepare => tr("Preparing to Write"),
+        Step::Write => tr("Writing to USB"),
+        Step::Verify => tr("Checking the Written Data"),
     }
 }
 
 // What the operation is doing, and a line under it.
-pub fn activity(tracker: &Tracker) -> (&'static str, &'static str) {
+pub fn activity(tracker: &Tracker) -> (String, String) {
     if tracker.cancel_requested {
-        return ("中止しています…", "処理が止まるまでお待ちください。");
+        return (tr("Cancelling…"), tr("Please wait until it stops."));
     }
-    const NOT_WRITTEN: &str = "まだ USB ドライブには書き込んでいません。";
-    const KEEP_CONNECTED: &str = "USB ドライブを取り外さないでください。";
-    const AUTHENTICATION: &str = "システムの認証画面が表示された場合は、認証を完了してください。";
+    let not_written = || tr("Nothing has been written to the USB drive yet.");
+    let keep_connected = || tr("Do not remove the USB drive.");
+    let authentication =
+        || tr("If the system asks you to authenticate, complete the authentication.");
     match tracker.activity {
-        Activity::Starting => ("書き込み先を確認しています…", NOT_WRITTEN),
-        Activity::PreparingImage => ("イメージを確認しています…", NOT_WRITTEN),
-        Activity::Preflight => ("圧縮イメージを確認しています…", NOT_WRITTEN),
-        Activity::AwaitingConfirmation => ("最終確認を待っています…", NOT_WRITTEN),
-        Activity::StartingWrite => ("書き込みを開始しています…", KEEP_CONNECTED),
+        Activity::Starting => (tr("Checking the target…"), not_written()),
+        Activity::PreparingImage => (tr("Checking the image…"), not_written()),
+        Activity::Preflight => (tr("Checking the compressed image…"), not_written()),
+        Activity::AwaitingConfirmation => {
+            (tr("Waiting for the final confirmation…"), not_written())
+        }
+        Activity::StartingWrite => (tr("Starting to write…"), keep_connected()),
         Activity::OpeningDevice(OpenPurpose::Write) => {
-            ("USB ドライブを開いています…", AUTHENTICATION)
+            (tr("Opening the USB drive…"), authentication())
         }
-        Activity::OpeningDevice(OpenPurpose::Verify) => {
-            ("検証のために USB ドライブを開いています…", AUTHENTICATION)
-        }
-        Activity::Writing if tracker.compression.is_some() => {
-            ("展開しながら書き込み中", KEEP_CONNECTED)
-        }
-        Activity::Writing => ("書き込み中", KEEP_CONNECTED),
-        Activity::Syncing => (
-            "書き込みを仕上げています…",
-            "USB ドライブへの書き込みを完了しています。取り外さないでください。",
+        Activity::OpeningDevice(OpenPurpose::Verify) => (
+            tr("Opening the USB drive for verification…"),
+            authentication(),
         ),
-        Activity::PreparingVerify => ("検証の準備をしています…", KEEP_CONNECTED),
+        Activity::Writing if tracker.compression.is_some() => {
+            (tr("Decompressing and writing"), keep_connected())
+        }
+        Activity::Writing => (tr("Writing"), keep_connected()),
+        Activity::Syncing => (
+            tr("Finishing the write…"),
+            tr("Completing the write to the USB drive. Do not remove it."),
+        ),
+        Activity::PreparingVerify => (tr("Preparing verification…"), keep_connected()),
         Activity::Verifying => match tracker.verify_mode {
-            VerifyMode::Full => ("完全検証中", "書き込んだデータをすべて確認しています。"),
-            _ => ("クイック検証中", "書き込んだデータを確認しています。"),
+            VerifyMode::Full => (
+                tr("Full verification in progress"),
+                tr("Checking all of the written data."),
+            ),
+            _ => (
+                tr("Quick verification in progress"),
+                tr("Checking the written data."),
+            ),
         },
-        Activity::Finished => ("", ""),
+        Activity::Finished => (String::new(), String::new()),
     }
 }
 
 // ---- The result ----
 
-pub fn result_title(case: ResultCase) -> &'static str {
+pub fn result_title(case: ResultCase) -> String {
     match case {
-        ResultCase::Verified(_) => "完了しました",
-        ResultCase::WrittenWithoutVerify => "書き込みが完了しました",
-        ResultCase::VerifyCancelled => "書き込みは完了しています",
-        ResultCase::VerifyMismatch => "検証で問題が見つかりました",
-        ResultCase::VerifyNotCompleted(_) => "検証を完了できませんでした",
-        ResultCase::WriteFailed { .. } => "書き込みを完了できませんでした",
+        ResultCase::Verified(_) => tr("Complete"),
+        ResultCase::WrittenWithoutVerify => tr("Writing Complete"),
+        ResultCase::VerifyCancelled => tr("Writing Is Complete"),
+        ResultCase::VerifyMismatch => tr("Verification Found a Problem"),
+        ResultCase::VerifyNotCompleted(_) => tr("Verification Could Not Be Completed"),
+        ResultCase::WriteFailed { .. } => tr("Writing Could Not Be Completed"),
         ResultCase::WriteCancelled { .. } | ResultCase::CancelledBeforeWrite => {
-            "書き込みを中止しました"
+            tr("Writing Cancelled")
         }
-        ResultCase::NotStarted(_) => "書き込みを開始できませんでした",
-        ResultCase::Lost => "書き込み処理を完了できませんでした",
+        ResultCase::NotStarted(_) => tr("Writing Could Not Start"),
+        ResultCase::Lost => tr("The Write Operation Could Not Be Completed"),
     }
 }
 
@@ -425,30 +460,30 @@ pub fn result_icon(kind: ResultKind) -> &'static str {
 // row of steps as while the operation ran: a few words for its final state
 // (what it means for the drive is the result message's). The operation has
 // ended, so no step is ever "waiting" or "running" here: a step it never
-// reached was not run ("なし" for a Verify that was not requested).
-pub fn result_step(case: ResultCase, line: StepLine) -> &'static str {
+// reached was not run ("None" for a Verify that was not requested).
+pub fn result_step(case: ResultCase, line: StepLine) -> String {
     match line.mark {
         Mark::Done => match (line.step, case) {
-            (Step::Verify, ResultCase::Verified(VerifyMode::Full)) => "完全検証完了",
-            (Step::Verify, ResultCase::Verified(_)) => "クイック検証完了",
-            _ => "完了",
+            (Step::Verify, ResultCase::Verified(VerifyMode::Full)) => tr("Full verification done"),
+            (Step::Verify, ResultCase::Verified(_)) => tr("Quick verification done"),
+            _ => tr("Done"),
         },
         // Never reached (`Active` does not outlast an operation).
-        Mark::Waiting | Mark::Active => "未実施",
-        Mark::Skipped => "なし",
-        Mark::Cancelled => "中止",
+        Mark::Waiting | Mark::Active => tr("Not run"),
+        Mark::Skipped => tr("None"),
+        Mark::Cancelled => tr("Cancelled"),
         Mark::Failed => match (line.step, case) {
-            (Step::Verify, ResultCase::VerifyMismatch) => "不一致",
+            (Step::Verify, ResultCase::VerifyMismatch) => tr("Mismatch"),
             (Step::Verify, ResultCase::VerifyNotCompleted(reason)) => {
                 if verify_ran(reason) {
-                    "完了できず"
+                    tr("Not completed")
                 } else {
-                    "開始できず"
+                    tr("Could not start")
                 }
             }
-            (Step::Write, ResultCase::WriteFailed { .. }) => "完了できず",
-            (Step::Write, ResultCase::NotStarted(_)) => "開始できず",
-            _ => "失敗",
+            (Step::Write, ResultCase::WriteFailed { .. }) => tr("Not completed"),
+            (Step::Write, ResultCase::NotStarted(_)) => tr("Could not start"),
+            _ => tr("Failed"),
         },
     }
 }
@@ -478,15 +513,19 @@ fn verify_ran(reason: Reason) -> bool {
 // What the result means for the USB drive now, and what to do. Built only
 // from the case's typed reasons, never from an error's own text.
 pub fn result_message(case: ResultCase) -> String {
-    const INCOMPLETE: &str = "USB ドライブには不完全なイメージが残っている可能性があります。起動用の USB ドライブとして使用しないでください。";
-    const NOTHING_WRITTEN: &str = "USB ドライブには何も書き込んでいません。";
+    let incomplete =
+        || tr("The USB drive may contain an incomplete image. Do not use it as a boot drive.");
+    let nothing_written = || tr("Nothing was written to the USB drive.");
     match case {
-        ResultCase::Verified(_) => "USB ドライブを使用できます。".to_string(),
-        ResultCase::WrittenWithoutVerify => "書き込み後の検証は行っていません。".to_string(),
-        ResultCase::VerifyCancelled => "書き込み後の検証は完了していません。".to_string(),
-        ResultCase::VerifyMismatch => "書き込みは完了しましたが、読み戻したデータがイメージと一致しませんでした。正しく書き込まれていない可能性があるため、この USB ドライブを起動用として使用することはおすすめしません。".to_string(),
+        ResultCase::Verified(_) => tr("The USB drive is ready to use."),
+        ResultCase::WrittenWithoutVerify => tr("The written data was not verified."),
+        ResultCase::VerifyCancelled => tr("Verification of the written data was not completed."),
+        ResultCase::VerifyMismatch => tr(
+            "Writing finished, but the data read back did not match the image. It may not have been written correctly, so using this USB drive as a boot drive is not recommended.",
+        ),
         ResultCase::VerifyNotCompleted(reason) => format!(
-            "書き込みは完了していますが、検証を完了できませんでした。\n{}",
+            "{}\n{}",
+            tr("Writing is complete, but verification could not be completed."),
             reason_text(reason)
         ),
         ResultCase::WriteFailed {
@@ -496,34 +535,37 @@ pub fn result_message(case: ResultCase) -> String {
             "{}\n{}",
             reason_text(reason),
             if target_modified {
-                INCOMPLETE
+                incomplete()
             } else {
-                NOTHING_WRITTEN
+                nothing_written()
             }
         ),
-        ResultCase::WriteCancelled { target_modified } => if target_modified {
-            INCOMPLETE
-        } else {
-            NOTHING_WRITTEN
+        ResultCase::WriteCancelled { target_modified } => {
+            if target_modified {
+                incomplete()
+            } else {
+                nothing_written()
+            }
         }
-        .to_string(),
-        ResultCase::CancelledBeforeWrite => {
-            "USB ドライブへの書き込みは開始されていません。".to_string()
-        }
-        ResultCase::NotStarted(reason) => format!("{}\n{NOTHING_WRITTEN}", reason_text(reason)),
-        ResultCase::Lost => format!("内部エラーで処理が終了しました。\n{INCOMPLETE}"),
+        ResultCase::CancelledBeforeWrite => tr("Writing to the USB drive was not started."),
+        ResultCase::NotStarted(reason) => format!("{}\n{}", reason_text(reason), nothing_written()),
+        ResultCase::Lost => format!(
+            "{}\n{}",
+            tr("The operation ended because of an internal error."),
+            incomplete()
+        ),
     }
 }
 
-pub fn result_action(action: ResultAction) -> &'static str {
+pub fn result_action(action: ResultAction) -> String {
     match action {
-        ResultAction::SafeRemoval => "安全に取り外す",
-        ResultAction::RetryRemoval => "もう一度試す",
-        ResultAction::WriteAnother => "別の USB に書き込む",
-        ResultAction::WriteAgain => "もう一度書き込む",
-        ResultAction::Retry => "やり直す",
-        ResultAction::BackToMain => "メイン画面に戻る",
-        ResultAction::Done => "完了",
+        ResultAction::SafeRemoval => tr("Safely Remove"),
+        ResultAction::RetryRemoval => tr("Try Again"),
+        ResultAction::WriteAnother => tr("Write to Another USB"),
+        ResultAction::WriteAgain => tr("Write Again"),
+        ResultAction::Retry => tr("Start Over"),
+        ResultAction::BackToMain => tr("Back to Main View"),
+        ResultAction::Done => tr("Done"),
     }
 }
 
@@ -536,61 +578,68 @@ pub fn result_action(action: ResultAction) -> &'static str {
 // nothing was changed (filesystems may have been unmounted before it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalText {
-    pub title: &'static str,
+    pub title: String,
     pub message: String,
-    pub extra: Option<&'static str>,
+    pub extra: Option<String>,
 }
 
 // `target_name`: the target as the operation's own events named it.
 pub fn removal(notice: RemovalNotice, target_name: Option<&str>) -> RemovalText {
-    const DO_NOT_REMOVE: &str = "USB ドライブはまだ取り外さないでください。";
-    const ELSEWHERE: &str = "ファイルマネージャーなどから取り外してください。";
-    let text = |title, message: &str| RemovalText {
+    let text = |title: String, message: String| RemovalText {
         title,
-        message: message.to_string(),
+        message,
         extra: None,
     };
     let status = match notice {
-        RemovalNotice::Removing => return text("USB を安全に取り外しています…", DO_NOT_REMOVE),
+        RemovalNotice::Removing => {
+            return text(
+                tr("Safely removing the USB drive…"),
+                tr("Do not unplug the USB drive yet."),
+            );
+        }
         RemovalNotice::Finished(status) => status,
     };
     match status {
         RemovalStatus::Removed {
             unmounted_filesystems,
         } => RemovalText {
-            title: "USB を安全に取り外せます",
-            message: format!(
-                "{}をパソコンから取り外してください。",
-                match target_name {
-                    Some(name) => format!("{name} "),
-                    None => "USB ドライブ".to_string(),
-                }
-            ),
-            extra: unmounted_filesystems.then_some("ファイルシステムを終了しました"),
+            title: tr("The USB drive can be safely removed"),
+            message: match target_name {
+                Some(name) => fill(tr("Unplug {name} from the computer."), &[("name", name)]),
+                None => tr("Unplug the USB drive from the computer."),
+            },
+            extra: unmounted_filesystems.then(|| tr("Its filesystems were unmounted")),
         },
         RemovalStatus::DeviceGone => text(
-            "USB が見つかりません",
-            "USB ドライブが接続されていることを確認してください。",
+            tr("USB drive not found"),
+            tr("Make sure the USB drive is connected."),
         ),
         RemovalStatus::DeviceChanged => text(
-            "USB の状態が変わりました",
-            "書き込み時と同じデバイスであることを確認できなかったため、安全な取り外しを中止しました。",
+            tr("The USB drive has changed"),
+            tr(
+                "It could not be confirmed to be the same device as when writing, so safe removal was stopped.",
+            ),
         ),
-        RemovalStatus::Unsupported => text("この USB はアプリから安全に取り外せません", ELSEWHERE),
+        RemovalStatus::Unsupported => text(
+            tr("This USB drive cannot be safely removed from this app"),
+            tr("Eject it from a file manager or similar instead."),
+        ),
         RemovalStatus::Busy => text(
-            "USB を取り外せませんでした",
-            "USB ドライブがほかのアプリで使用されています。使用中のファイルやアプリを閉じて、もう一度お試しください。",
+            tr("The USB drive could not be removed"),
+            tr(
+                "The USB drive is being used by another app. Close any files or apps that use it, then try again.",
+            ),
         ),
-        RemovalStatus::NotAuthorized => RemovalText {
-            title: "安全な取り外しを実行できませんでした",
-            message: format!("この操作を実行する権限がありません。{ELSEWHERE}"),
-            extra: None,
-        },
-        RemovalStatus::NotCompleted => RemovalText {
-            title: "安全な取り外しを完了できませんでした",
-            message: format!("{DO_NOT_REMOVE}{ELSEWHERE}"),
-            extra: None,
-        },
+        RemovalStatus::NotAuthorized => text(
+            tr("Safe removal could not be performed"),
+            tr(
+                "You are not allowed to do this. Eject the USB drive from a file manager or similar instead.",
+            ),
+        ),
+        RemovalStatus::NotCompleted => text(
+            tr("Safe removal could not be completed"),
+            tr("Do not unplug the USB drive yet. Eject it from a file manager or similar instead."),
+        ),
     }
 }
 
@@ -621,60 +670,62 @@ pub fn target_summary(target: &DeviceDisplay) -> String {
     )
 }
 
-pub fn reason_text(reason: Reason) -> &'static str {
+pub fn reason_text(reason: Reason) -> String {
     match reason {
-        Reason::TargetNotFound => "書き込み先の USB ドライブが見つかりません。",
-        Reason::TargetUnreadable => "書き込み先の USB ドライブの情報を取得できませんでした。",
+        Reason::TargetNotFound => tr("The target USB drive was not found."),
+        Reason::TargetUnreadable => tr("Information about the target USB drive could not be read."),
         Reason::TargetChanged => {
-            "書き込み先の USB ドライブを、選択したものと同じだと確認できませんでした。"
+            tr("The target USB drive could not be confirmed to be the same one that was selected.")
         }
         Reason::TargetNotSelectable => {
-            "書き込み先の USB ドライブは、現在は書き込み先に選べません。"
+            tr("The target USB drive cannot be chosen as the target at the moment.")
         }
-        Reason::ImageUnreadable => "イメージファイルを読み取れませんでした。",
-        Reason::ImageRefused => "このイメージは書き込めません。",
-        Reason::QuickVerifyUnsupported => "このイメージではクイック検証を利用できません。",
-        Reason::CompressedImageDamaged => "圧縮イメージが壊れているか、不完全です。",
+        Reason::ImageUnreadable => tr("The image file could not be read."),
+        Reason::ImageRefused => tr("This image cannot be written."),
+        Reason::QuickVerifyUnsupported => tr("Quick verification is not available for this image."),
+        Reason::CompressedImageDamaged => tr("The compressed image is damaged or incomplete."),
         Reason::CompressedImageTooLarge => {
-            "展開後のサイズが、書き込み先の USB ドライブの容量を超えています。"
+            tr("The decompressed size is larger than the capacity of the target USB drive.")
         }
-        Reason::CompressedImageTooDemanding => {
-            "この圧縮イメージは、展開に必要な資源が多すぎるため書き込めません。"
-        }
-        Reason::ImageChanged => "確認中にイメージファイルが変更されました。",
+        Reason::CompressedImageTooDemanding => tr(
+            "This compressed image needs too many resources to decompress, so it cannot be written.",
+        ),
+        Reason::ImageChanged => tr("The image file changed while it was being checked."),
         Reason::ConfirmationFailed => {
-            "最終確認の内容と一致しなかったため、書き込みを開始しませんでした。"
+            tr("Writing was not started because it did not match the final confirmation.")
         }
         Reason::TargetRecheckFailed => {
-            "書き込み直前の再確認で、書き込み先の USB ドライブに問題が見つかりました。"
+            tr("The check right before writing found a problem with the target USB drive.")
         }
-        Reason::AccessDenied => "USB ドライブへのアクセスが許可されませんでした。",
+        Reason::AccessDenied => tr("Access to the USB drive was not allowed."),
         Reason::AuthenticationCancelled => {
-            "認証がキャンセルされたため、USB ドライブを開けませんでした。"
+            tr("Authentication was cancelled, so the USB drive could not be opened.")
         }
-        Reason::DeviceBusyOrRefused => "USB ドライブを開けませんでした。使用中の可能性があります。",
+        Reason::DeviceBusyOrRefused => tr("The USB drive could not be opened. It may be in use."),
         Reason::SystemServiceUnavailable => {
-            "システムのディスク管理サービス（UDisks2）と通信できませんでした。"
+            tr("Could not communicate with the system's disk management service (UDisks2).")
         }
-        Reason::OpenedDeviceMismatch => {
-            "開いたデバイスを書き込み先と同じだと確認できなかったため、書き込みを開始しませんでした。"
+        Reason::OpenedDeviceMismatch => tr(
+            "Writing was not started because the opened device could not be confirmed to be the target.",
+        ),
+        Reason::WriteError => tr("An error occurred while writing to the USB drive."),
+        Reason::ImageChangedDuringWrite => tr("The image file changed during writing."),
+        Reason::SyncError => {
+            tr("The write could not be finished (the data could not be committed).")
         }
-        Reason::WriteError => "USB ドライブへの書き込み中にエラーが発生しました。",
-        Reason::ImageChangedDuringWrite => "書き込み中にイメージファイルが変更されました。",
-        Reason::SyncError => "書き込みの仕上げ（データの確定）を完了できませんでした。",
-        Reason::VerifyTargetChanged => {
-            "検証の前の再確認で、USB ドライブを書き込み先と同じだと確認できませんでした。"
-        }
-        Reason::VerifyOpenFailed => "検証のために USB ドライブを開けませんでした。",
+        Reason::VerifyTargetChanged => tr(
+            "The check before verification could not confirm that the USB drive is the same as the target.",
+        ),
+        Reason::VerifyOpenFailed => tr("The USB drive could not be opened for verification."),
         Reason::VerifyDirectReadUnavailable => {
-            "この環境では、検証に必要な直接読み取りを利用できませんでした。"
+            tr("Direct reading, which verification needs, is not available in this environment.")
         }
-        Reason::VerifyNotStarted => "検証が開始されませんでした。",
-        Reason::VerifyMismatch => {
-            "書き込んだデータがイメージと一致しませんでした。この USB ドライブは正しく書き込まれていない可能性があります。"
-        }
-        Reason::VerifyReadError => "読み戻し中にエラーが発生しました。",
-        Reason::VerifyLengthMismatch => "読み戻したデータの長さが一致しませんでした。",
+        Reason::VerifyNotStarted => tr("Verification did not start."),
+        Reason::VerifyMismatch => tr(
+            "The written data did not match the image. This USB drive may not have been written correctly.",
+        ),
+        Reason::VerifyReadError => tr("An error occurred while reading back."),
+        Reason::VerifyLengthMismatch => tr("The length of the data read back did not match."),
     }
 }
 
@@ -685,10 +736,10 @@ pub fn reason_text(reason: Reason) -> &'static str {
 pub struct ConfirmationText {
     pub image_name: String,
     // (label, value) lines under the image name.
-    pub image_lines: Vec<(&'static str, String)>,
+    pub image_lines: Vec<(String, String)>,
     pub target_name: String,
     pub target_line: String,
-    pub verify: &'static str,
+    pub verify: String,
     pub warning: String,
 }
 
@@ -701,13 +752,13 @@ pub fn confirmation(
     let target = &request.target;
     let target_name = device_name(&target.vendor, &target.model);
     let image_lines = match compression {
-        None => vec![("サイズ", size(request.image_size))],
+        None => vec![(tr("Size"), size(request.image_size))],
         Some(format) => {
-            let mut lines = vec![("形式", image_kind(Some(format)).to_string())];
+            let mut lines = vec![(tr("Format"), image_kind(Some(format)))];
             if let Some(compressed) = compressed_size {
-                lines.push(("圧縮ファイル", size(compressed)));
+                lines.push((tr("Compressed file"), size(compressed)));
             }
-            lines.push(("書き込みサイズ", size(request.image_size)));
+            lines.push((tr("Write size"), size(request.image_size)));
             lines
         }
     };
@@ -720,9 +771,9 @@ pub fn confirmation(
             size(target.size),
             bus(&target.connection_bus)
         ),
-        warning: format!(
-            "{target_name}（{}）のデータはすべて消去されます。",
-            target.device
+        warning: fill(
+            tr("All data on {name} ({device}) will be erased."),
+            &[("name", &target_name), ("device", &target.device)],
         ),
         target_name,
         verify: verify_title(request.verify_mode),
@@ -737,11 +788,13 @@ mod tests {
 
     #[test]
     fn sizes_read_naturally() {
-        assert_eq!(size(512), "512 バイト");
-        assert_eq!(size(8_054_112_256), "8.1 GB");
-        assert_eq!(size(620_000_000), "620.0 MB");
-        assert_eq!(exact_bytes(8_054_112_256), "8,054,112,256 バイト");
-        assert_eq!(exact_bytes(999), "999 バイト");
+        crate::i18n::ja(|| {
+            assert_eq!(size(512), "512 バイト");
+            assert_eq!(size(8_054_112_256), "8.1 GB");
+            assert_eq!(size(620_000_000), "620.0 MB");
+            assert_eq!(exact_bytes(8_054_112_256), "8,054,112,256 バイト");
+            assert_eq!(exact_bytes(999), "999 バイト");
+        });
     }
 
     #[test]
@@ -773,48 +826,54 @@ mod tests {
 
     #[test]
     fn only_the_selected_verify_mode_is_explained() {
-        assert_eq!(verify_help(false, VerifyMode::Quick), None);
-        assert_eq!(
-            verify_help(true, VerifyMode::Quick),
-            Some("書き込み後、一部を読み戻して確認します。")
-        );
-        assert_eq!(
-            verify_help(true, VerifyMode::Full),
-            Some(
-                "書き込んだデータをすべて読み戻して確認します。\nクイック検証より時間がかかります。"
-            )
-        );
-        assert_eq!(
-            verify_help(true, VerifyMode::None),
-            Some("書き込み後の読み戻し確認は行われません。")
-        );
-        // Each mode has its own explanation.
-        let modes = [VerifyMode::Quick, VerifyMode::Full, VerifyMode::None];
-        for a in modes {
-            for b in modes {
-                assert_eq!(a == b, verify_help(true, a) == verify_help(true, b));
+        crate::i18n::ja(|| {
+            assert_eq!(verify_help(false, VerifyMode::Quick), None);
+            assert_eq!(
+                verify_help(true, VerifyMode::Quick).as_deref(),
+                Some("書き込み後、一部を読み戻して確認します。")
+            );
+            assert_eq!(
+                verify_help(true, VerifyMode::Full).as_deref(),
+                Some(
+                    "書き込んだデータをすべて読み戻して確認します。\nクイック検証より時間がかかります。"
+                )
+            );
+            assert_eq!(
+                verify_help(true, VerifyMode::None).as_deref(),
+                Some("書き込み後の読み戻し確認は行われません。")
+            );
+            // Each mode has its own explanation.
+            let modes = [VerifyMode::Quick, VerifyMode::Full, VerifyMode::None];
+            for a in modes {
+                for b in modes {
+                    assert_eq!(a == b, verify_help(true, a) == verify_help(true, b));
+                }
             }
-        }
+        });
     }
 
     #[test]
     fn a_protected_device_says_why() {
-        assert_eq!(
-            protection(&[RiskReason::CriticalMount, RiskReason::SystemDevice]),
-            "システム領域（/ や /boot など）が使用しています。システムのディスクです。"
-        );
-        // The informational reason alone explains nothing.
-        assert_eq!(
-            protection(&[RiskReason::UsbRemovable]),
-            "安全のため選択できません。"
-        );
+        crate::i18n::ja(|| {
+            assert_eq!(
+                protection(&[RiskReason::CriticalMount, RiskReason::SystemDevice]),
+                "システム領域（/ や /boot など）が使用しています。システムのディスクです。"
+            );
+            // The informational reason alone explains nothing.
+            assert_eq!(
+                protection(&[RiskReason::UsbRemovable]),
+                "安全のため選択できません。"
+            );
+        });
     }
 
     #[test]
     fn transfers_use_the_totals_unit() {
-        assert_eq!(transfer(1_150_000_000, 1_800_000_000), "1.15 GB / 1.80 GB");
-        assert_eq!(transfer(0, 620_000_000), "0.00 MB / 620.00 MB");
-        assert_eq!(transfer(12, 512), "12 / 512 バイト");
+        crate::i18n::ja(|| {
+            assert_eq!(transfer(1_150_000_000, 1_800_000_000), "1.15 GB / 1.80 GB");
+            assert_eq!(transfer(0, 620_000_000), "0.00 MB / 620.00 MB");
+            assert_eq!(transfer(12, 512), "12 / 512 バイト");
+        });
     }
 
     // The request as the worker sends it: its values are the operation's
@@ -848,81 +907,100 @@ mod tests {
 
     #[test]
     fn the_confirmation_shows_the_requests_values() {
-        let text = confirmation(&request(VerifyMode::Quick), "os.img", None, None);
-        assert_eq!(text.image_name, "os.img");
-        assert_eq!(text.image_lines, vec![("サイズ", "3.8 GB".to_string())]);
-        assert_eq!(text.target_name, "Fresh Drive");
-        assert_eq!(text.target_line, "/dev/sdq · 16.0 GB · USB");
-        assert_eq!(text.verify, "クイック検証");
-        assert_eq!(
-            text.warning,
-            "Fresh Drive（/dev/sdq）のデータはすべて消去されます。"
-        );
-        // The serial number is not shown.
-        assert!(!format!("{text:?}").contains("\"S\""));
+        crate::i18n::ja(|| {
+            let text = confirmation(&request(VerifyMode::Quick), "os.img", None, None);
+            assert_eq!(text.image_name, "os.img");
+            assert_eq!(
+                text.image_lines,
+                vec![("サイズ".to_string(), "3.8 GB".to_string())]
+            );
+            assert_eq!(text.target_name, "Fresh Drive");
+            assert_eq!(text.target_line, "/dev/sdq · 16.0 GB · USB");
+            assert_eq!(text.verify, "クイック検証");
+            assert_eq!(
+                text.warning,
+                "Fresh Drive（/dev/sdq）のデータはすべて消去されます。"
+            );
+            // The serial number is not shown.
+            assert!(!format!("{text:?}").contains("\"S\""));
+        });
     }
 
     #[test]
     fn a_compressed_confirmation_shows_both_sizes() {
-        let text = confirmation(
-            &request(VerifyMode::Full),
-            "os.img.xz",
-            Some(CompressionFormat::Xz),
-            Some(620_000_000),
-        );
-        assert_eq!(
-            text.image_lines,
-            vec![
-                ("形式", "XZ 圧縮イメージ".to_string()),
-                ("圧縮ファイル", "620.0 MB".to_string()),
-                ("書き込みサイズ", "3.8 GB".to_string()),
-            ]
-        );
-        assert_eq!(text.verify, "完全検証");
+        crate::i18n::ja(|| {
+            let text = confirmation(
+                &request(VerifyMode::Full),
+                "os.img.xz",
+                Some(CompressionFormat::Xz),
+                Some(620_000_000),
+            );
+            assert_eq!(
+                text.image_lines,
+                vec![
+                    ("形式".to_string(), "XZ 圧縮イメージ".to_string()),
+                    ("圧縮ファイル".to_string(), "620.0 MB".to_string()),
+                    ("書き込みサイズ".to_string(), "3.8 GB".to_string()),
+                ]
+            );
+            assert_eq!(text.verify, "完全検証");
+        });
     }
 
     #[test]
     fn compressed_writes_say_they_decompress() {
-        let mut tracker = Tracker::new(VerifyMode::Full);
-        tracker.activity = Activity::Writing;
-        assert_eq!(activity(&tracker).0, "書き込み中");
-        tracker.compression = Some(CompressionFormat::Gzip);
-        assert_eq!(activity(&tracker).0, "展開しながら書き込み中");
-        tracker.activity = Activity::Syncing;
-        assert_eq!(activity(&tracker).0, "書き込みを仕上げています…");
-        tracker.cancel_requested = true;
-        assert_eq!(activity(&tracker).0, "中止しています…");
+        crate::i18n::ja(|| {
+            let mut tracker = Tracker::new(VerifyMode::Full);
+            tracker.activity = Activity::Writing;
+            assert_eq!(activity(&tracker).0, "書き込み中");
+            tracker.compression = Some(CompressionFormat::Gzip);
+            assert_eq!(activity(&tracker).0, "展開しながら書き込み中");
+            tracker.activity = Activity::Syncing;
+            assert_eq!(activity(&tracker).0, "書き込みを仕上げています…");
+            tracker.cancel_requested = true;
+            assert_eq!(activity(&tracker).0, "中止しています…");
+        });
     }
 
     #[test]
     fn verify_is_worded_as_checking_the_written_data() {
-        let mut tracker = Tracker::new(VerifyMode::Quick);
-        tracker.activity = Activity::Verifying;
-        assert_eq!(
-            activity(&tracker),
-            ("クイック検証中", "書き込んだデータを確認しています。")
-        );
-        tracker.verify_mode = VerifyMode::Full;
-        assert_eq!(
-            activity(&tracker),
-            ("完全検証中", "書き込んだデータをすべて確認しています。")
-        );
-        for text in [
-            activity(&tracker).0,
-            activity(&tracker).1,
-            headline(Step::Verify),
-        ] {
-            assert!(!text.contains("安全"), "{text}");
-        }
+        crate::i18n::ja(|| {
+            let mut tracker = Tracker::new(VerifyMode::Quick);
+            tracker.activity = Activity::Verifying;
+            assert_eq!(
+                activity(&tracker),
+                (
+                    "クイック検証中".to_string(),
+                    "書き込んだデータを確認しています。".to_string()
+                )
+            );
+            tracker.verify_mode = VerifyMode::Full;
+            assert_eq!(
+                activity(&tracker),
+                (
+                    "完全検証中".to_string(),
+                    "書き込んだデータをすべて確認しています。".to_string()
+                )
+            );
+            for text in [
+                activity(&tracker).0,
+                activity(&tracker).1,
+                headline(Step::Verify),
+            ] {
+                assert!(!text.contains("安全"), "{text}");
+            }
+        });
     }
 
     #[test]
     fn preparing_says_nothing_was_written_yet() {
-        let tracker = Tracker::new(VerifyMode::Quick);
-        assert_eq!(
-            activity(&tracker).1,
-            "まだ USB ドライブには書き込んでいません。"
-        );
+        crate::i18n::ja(|| {
+            let tracker = Tracker::new(VerifyMode::Quick);
+            assert_eq!(
+                activity(&tracker).1,
+                "まだ USB ドライブには書き込んでいません。"
+            );
+        });
     }
 
     fn every_case() -> Vec<ResultCase> {
@@ -971,7 +1049,7 @@ mod tests {
             })
         {
             said.push('\n');
-            said.push_str(result_step(case, StepLine { step, mark }));
+            said.push_str(&result_step(case, StepLine { step, mark }));
         }
         said
     }
@@ -982,128 +1060,146 @@ mod tests {
 
     #[test]
     fn success_says_what_was_verified() {
-        let quick = ResultCase::Verified(VerifyMode::Quick);
-        assert_eq!(result_title(quick), "完了しました");
-        assert_eq!(result_step(quick, line(Step::Write, Mark::Done)), "完了");
-        assert_eq!(
-            result_step(quick, line(Step::Verify, Mark::Done)),
-            "クイック検証完了"
-        );
-        assert_eq!(result_message(quick), "USB ドライブを使用できます。");
-        let full = ResultCase::Verified(VerifyMode::Full);
-        assert_eq!(
-            result_step(full, line(Step::Verify, Mark::Done)),
-            "完全検証完了"
-        );
+        crate::i18n::ja(|| {
+            let quick = ResultCase::Verified(VerifyMode::Quick);
+            assert_eq!(result_title(quick), "完了しました");
+            assert_eq!(result_step(quick, line(Step::Write, Mark::Done)), "完了");
+            assert_eq!(
+                result_step(quick, line(Step::Verify, Mark::Done)),
+                "クイック検証完了"
+            );
+            assert_eq!(result_message(quick), "USB ドライブを使用できます。");
+            let full = ResultCase::Verified(VerifyMode::Full);
+            assert_eq!(
+                result_step(full, line(Step::Verify, Mark::Done)),
+                "完全検証完了"
+            );
+        });
     }
 
     #[test]
     fn verify_none_never_claims_a_verified_or_usable_drive() {
-        let case = ResultCase::WrittenWithoutVerify;
-        assert_eq!(result_title(case), "書き込みが完了しました");
-        assert_eq!(result_step(case, line(Step::Verify, Mark::Skipped)), "なし");
-        assert_eq!(result_message(case), "書き込み後の検証は行っていません。");
-        let said = everything_said(case);
-        for forbidden in ["検証済み", "使用できます", "正常", "安全"] {
-            assert!(!said.contains(forbidden), "{forbidden}: {said}");
-        }
+        crate::i18n::ja(|| {
+            let case = ResultCase::WrittenWithoutVerify;
+            assert_eq!(result_title(case), "書き込みが完了しました");
+            assert_eq!(result_step(case, line(Step::Verify, Mark::Skipped)), "なし");
+            assert_eq!(result_message(case), "書き込み後の検証は行っていません。");
+            let said = everything_said(case);
+            for forbidden in ["検証済み", "使用できます", "正常", "安全"] {
+                assert!(!said.contains(forbidden), "{forbidden}: {said}");
+            }
+        });
     }
 
     #[test]
     fn a_cancelled_verify_says_the_write_is_complete() {
-        let case = ResultCase::VerifyCancelled;
-        assert_eq!(result_title(case), "書き込みは完了しています");
-        assert_eq!(
-            result_step(case, line(Step::Verify, Mark::Cancelled)),
-            "中止"
-        );
-        assert_eq!(result_message(case), "書き込み後の検証は完了していません。");
-        // Not worded as an error: the lines it actually shows.
-        let said = [
-            result_title(case).to_string(),
-            result_message(case),
-            result_step(case, line(Step::Write, Mark::Done)).to_string(),
-            result_step(case, line(Step::Verify, Mark::Cancelled)).to_string(),
-        ]
-        .join("\n");
-        for error_like in ["失敗", "エラー", "問題"] {
-            assert!(!said.contains(error_like), "{said}");
-        }
+        crate::i18n::ja(|| {
+            let case = ResultCase::VerifyCancelled;
+            assert_eq!(result_title(case), "書き込みは完了しています");
+            assert_eq!(
+                result_step(case, line(Step::Verify, Mark::Cancelled)),
+                "中止"
+            );
+            assert_eq!(result_message(case), "書き込み後の検証は完了していません。");
+            // Not worded as an error: the lines it actually shows.
+            let said = [
+                result_title(case).to_string(),
+                result_message(case),
+                result_step(case, line(Step::Write, Mark::Done)).to_string(),
+                result_step(case, line(Step::Verify, Mark::Cancelled)).to_string(),
+            ]
+            .join("\n");
+            for error_like in ["失敗", "エラー", "問題"] {
+                assert!(!said.contains(error_like), "{said}");
+            }
+        });
     }
 
     #[test]
     fn a_mismatch_is_not_called_a_failed_write() {
-        let case = ResultCase::VerifyMismatch;
-        assert_eq!(result_title(case), "検証で問題が見つかりました");
-        assert_eq!(
-            result_step(case, line(Step::Verify, Mark::Failed)),
-            "不一致"
-        );
-        assert_eq!(result_step(case, line(Step::Write, Mark::Done)), "完了");
-        let message = result_message(case);
-        assert!(message.contains("おすすめしません"), "{message}");
-        let said = everything_said(case);
-        assert!(!said.contains("書き込み失敗"), "{said}");
-        assert!(!said.contains("書き込みを完了できませんでした"), "{said}");
+        crate::i18n::ja(|| {
+            let case = ResultCase::VerifyMismatch;
+            assert_eq!(result_title(case), "検証で問題が見つかりました");
+            assert_eq!(
+                result_step(case, line(Step::Verify, Mark::Failed)),
+                "不一致"
+            );
+            assert_eq!(result_step(case, line(Step::Write, Mark::Done)), "完了");
+            let message = result_message(case);
+            assert!(message.contains("おすすめしません"), "{message}");
+            let said = everything_said(case);
+            assert!(!said.contains("書き込み失敗"), "{said}");
+            assert!(!said.contains("書き込みを完了できませんでした"), "{said}");
+        });
     }
 
     #[test]
     fn a_verify_error_is_not_a_mismatch_and_the_write_is_complete() {
-        let during = ResultCase::VerifyNotCompleted(Reason::VerifyReadError);
-        assert_eq!(result_title(during), "検証を完了できませんでした");
-        assert_eq!(
-            result_step(during, line(Step::Verify, Mark::Failed)),
-            "完了できず"
-        );
-        assert!(result_message(during).starts_with("書き込みは完了しています"));
-        assert!(!everything_said(during).contains("一致しませんでした"));
-        // One that never started reading is not said to have run.
-        let before = ResultCase::VerifyNotCompleted(Reason::VerifyOpenFailed);
-        assert_eq!(
-            result_step(before, line(Step::Verify, Mark::Failed)),
-            "開始できず"
-        );
+        crate::i18n::ja(|| {
+            let during = ResultCase::VerifyNotCompleted(Reason::VerifyReadError);
+            assert_eq!(result_title(during), "検証を完了できませんでした");
+            assert_eq!(
+                result_step(during, line(Step::Verify, Mark::Failed)),
+                "完了できず"
+            );
+            assert!(result_message(during).starts_with("書き込みは完了しています"));
+            assert!(!everything_said(during).contains("一致しませんでした"));
+            // One that never started reading is not said to have run.
+            let before = ResultCase::VerifyNotCompleted(Reason::VerifyOpenFailed);
+            assert_eq!(
+                result_step(before, line(Step::Verify, Mark::Failed)),
+                "開始できず"
+            );
+        });
     }
 
     #[test]
     fn a_failed_or_cancelled_write_warns_about_an_incomplete_image() {
-        let failed = ResultCase::WriteFailed {
-            reason: Reason::WriteError,
-            target_modified: true,
-        };
-        assert_eq!(result_title(failed), "書き込みを完了できませんでした");
-        assert!(result_message(failed).contains("不完全なイメージ"));
-        assert!(result_message(failed).contains("起動用の USB ドライブとして使用しないでください"));
+        crate::i18n::ja(|| {
+            let failed = ResultCase::WriteFailed {
+                reason: Reason::WriteError,
+                target_modified: true,
+            };
+            assert_eq!(result_title(failed), "書き込みを完了できませんでした");
+            assert!(result_message(failed).contains("不完全なイメージ"));
+            assert!(
+                result_message(failed).contains("起動用の USB ドライブとして使用しないでください")
+            );
 
-        let cancelled = ResultCase::WriteCancelled {
-            target_modified: true,
-        };
-        assert_eq!(result_title(cancelled), "書き込みを中止しました");
-        assert!(result_message(cancelled).contains("不完全なイメージ"));
-        assert!(!everything_said(cancelled).contains("エラー"));
+            let cancelled = ResultCase::WriteCancelled {
+                target_modified: true,
+            };
+            assert_eq!(result_title(cancelled), "書き込みを中止しました");
+            assert!(result_message(cancelled).contains("不完全なイメージ"));
+            assert!(!everything_said(cancelled).contains("エラー"));
+        });
     }
 
     #[test]
     fn a_cancellation_before_the_write_says_it_never_started() {
-        let case = ResultCase::CancelledBeforeWrite;
-        assert_eq!(result_title(case), "書き込みを中止しました");
-        assert_eq!(
-            result_message(case),
-            "USB ドライブへの書き込みは開始されていません。"
-        );
+        crate::i18n::ja(|| {
+            let case = ResultCase::CancelledBeforeWrite;
+            assert_eq!(result_title(case), "書き込みを中止しました");
+            assert_eq!(
+                result_message(case),
+                "USB ドライブへの書き込みは開始されていません。"
+            );
+        });
     }
 
     // No result says the drive can be removed (only a completed Safe
     // Removal may), nor that nothing was changed on it by removal.
     #[test]
     fn no_result_speaks_for_safe_removal() {
-        for case in every_case() {
-            let said = everything_said(case);
-            for forbidden in ["安全", "取り外", "電源", "何も変更"] {
-                assert!(!said.contains(forbidden), "{case:?}: {said}");
+        crate::i18n::ja(|| {
+            for case in every_case() {
+                let said = everything_said(case);
+                for forbidden in ["安全", "取り外", "電源", "何も変更"] {
+                    assert!(!said.contains(forbidden), "{case:?}: {said}");
+                }
             }
-        }
-        assert_eq!(result_action(ResultAction::SafeRemoval), "安全に取り外す");
+            assert_eq!(result_action(ResultAction::SafeRemoval), "安全に取り外す");
+        });
     }
 
     // Result texts are built from typed reasons only: no type names, no
@@ -1170,95 +1266,101 @@ mod tests {
             "{}\n{}\n{}",
             text.title,
             text.message,
-            text.extra.unwrap_or("")
+            text.extra.as_deref().unwrap_or("")
         )
     }
 
     #[test]
     fn removed_names_the_drive_and_says_it_can_be_removed() {
-        let removed = |unmounted_filesystems, name| {
-            removal(
-                RemovalNotice::Finished(RemovalStatus::Removed {
-                    unmounted_filesystems,
-                }),
-                name,
-            )
-        };
-        let text = removed(false, Some("General UDisk"));
-        assert_eq!(text.title, "USB を安全に取り外せます");
-        assert_eq!(
-            text.message,
-            "General UDisk をパソコンから取り外してください。"
-        );
-        assert_eq!(text.extra, None);
-        assert_eq!(
-            removed(false, None).message,
-            "USB ドライブをパソコンから取り外してください。"
-        );
-        // Only when the outcome lists filesystems it unmounted.
-        assert_eq!(
-            removed(true, Some("General UDisk")).extra,
-            Some("ファイルシステムを終了しました")
-        );
+        crate::i18n::ja(|| {
+            let removed = |unmounted_filesystems, name| {
+                removal(
+                    RemovalNotice::Finished(RemovalStatus::Removed {
+                        unmounted_filesystems,
+                    }),
+                    name,
+                )
+            };
+            let text = removed(false, Some("General UDisk"));
+            assert_eq!(text.title, "USB を安全に取り外せます");
+            assert_eq!(
+                text.message,
+                "General UDisk をパソコンから取り外してください。"
+            );
+            assert_eq!(text.extra, None);
+            assert_eq!(
+                removed(false, None).message,
+                "USB ドライブをパソコンから取り外してください。"
+            );
+            // Only when the outcome lists filesystems it unmounted.
+            assert_eq!(
+                removed(true, Some("General UDisk")).extra.as_deref(),
+                Some("ファイルシステムを終了しました")
+            );
+        });
     }
 
     #[test]
     fn removing_says_not_to_remove_yet() {
-        let text = removal(RemovalNotice::Removing, Some("General UDisk"));
-        assert_eq!(text.title, "USB を安全に取り外しています…");
-        assert_eq!(text.message, "USB ドライブはまだ取り外さないでください。");
-        assert_eq!(removal_icon(RemovalNotice::Removing), None);
+        crate::i18n::ja(|| {
+            let text = removal(RemovalNotice::Removing, Some("General UDisk"));
+            assert_eq!(text.title, "USB を安全に取り外しています…");
+            assert_eq!(text.message, "USB ドライブはまだ取り外さないでください。");
+            assert_eq!(removal_icon(RemovalNotice::Removing), None);
+        });
     }
 
     #[test]
     fn each_failure_reads_as_specified() {
-        let finished = |status| removal(RemovalNotice::Finished(status), Some("General UDisk"));
-        assert_eq!(
-            finished(RemovalStatus::DeviceGone).title,
-            "USB が見つかりません"
-        );
-        assert_eq!(
-            finished(RemovalStatus::DeviceGone).message,
-            "USB ドライブが接続されていることを確認してください。"
-        );
-        assert_eq!(
-            finished(RemovalStatus::DeviceChanged).title,
-            "USB の状態が変わりました"
-        );
-        assert!(
-            finished(RemovalStatus::DeviceChanged)
-                .message
-                .contains("同じデバイス")
-        );
-        assert_eq!(
-            finished(RemovalStatus::Unsupported).title,
-            "この USB はアプリから安全に取り外せません"
-        );
-        assert_eq!(
-            finished(RemovalStatus::Unsupported).message,
-            "ファイルマネージャーなどから取り外してください。"
-        );
-        assert_eq!(
-            finished(RemovalStatus::Busy).title,
-            "USB を取り外せませんでした"
-        );
-        assert!(
-            finished(RemovalStatus::Busy)
-                .message
-                .contains("もう一度お試しください")
-        );
-        assert_eq!(
-            finished(RemovalStatus::NotAuthorized).title,
-            "安全な取り外しを実行できませんでした"
-        );
-        assert!(
-            finished(RemovalStatus::NotAuthorized)
-                .message
-                .contains("権限がありません")
-        );
-        let not_completed = finished(RemovalStatus::NotCompleted);
-        assert_eq!(not_completed.title, "安全な取り外しを完了できませんでした");
-        assert!(not_completed.message.contains("まだ取り外さないでください"));
+        crate::i18n::ja(|| {
+            let finished = |status| removal(RemovalNotice::Finished(status), Some("General UDisk"));
+            assert_eq!(
+                finished(RemovalStatus::DeviceGone).title,
+                "USB が見つかりません"
+            );
+            assert_eq!(
+                finished(RemovalStatus::DeviceGone).message,
+                "USB ドライブが接続されていることを確認してください。"
+            );
+            assert_eq!(
+                finished(RemovalStatus::DeviceChanged).title,
+                "USB の状態が変わりました"
+            );
+            assert!(
+                finished(RemovalStatus::DeviceChanged)
+                    .message
+                    .contains("同じデバイス")
+            );
+            assert_eq!(
+                finished(RemovalStatus::Unsupported).title,
+                "この USB はアプリから安全に取り外せません"
+            );
+            assert_eq!(
+                finished(RemovalStatus::Unsupported).message,
+                "ファイルマネージャーなどから取り外してください。"
+            );
+            assert_eq!(
+                finished(RemovalStatus::Busy).title,
+                "USB を取り外せませんでした"
+            );
+            assert!(
+                finished(RemovalStatus::Busy)
+                    .message
+                    .contains("もう一度お試しください")
+            );
+            assert_eq!(
+                finished(RemovalStatus::NotAuthorized).title,
+                "安全な取り外しを実行できませんでした"
+            );
+            assert!(
+                finished(RemovalStatus::NotAuthorized)
+                    .message
+                    .contains("権限がありません")
+            );
+            let not_completed = finished(RemovalStatus::NotCompleted);
+            assert_eq!(not_completed.title, "安全な取り外しを完了できませんでした");
+            assert!(not_completed.message.contains("まだ取り外さないでください"));
+        });
     }
 
     // Only Removed says the drive can be removed; nothing overstates what
@@ -1266,27 +1368,29 @@ mod tests {
     // calls the drive faulty).
     #[test]
     fn only_removed_says_the_drive_can_be_removed() {
-        for status in every_status() {
-            let text = said(&removal(
-                RemovalNotice::Finished(status),
-                Some("General UDisk"),
-            ));
-            let removed = matches!(status, RemovalStatus::Removed { .. });
-            assert_eq!(text.contains("安全に取り外せます"), removed, "{status:?}");
-            for forbidden in [
-                "電源を切りました",
-                "完全に安全",
-                "絶対",
-                "何も変更",
-                "何もしていません",
-                "Unmount",
-                "故障",
-                "異常",
-            ] {
-                assert!(!text.contains(forbidden), "{status:?}: {text}");
+        crate::i18n::ja(|| {
+            for status in every_status() {
+                let text = said(&removal(
+                    RemovalNotice::Finished(status),
+                    Some("General UDisk"),
+                ));
+                let removed = matches!(status, RemovalStatus::Removed { .. });
+                assert_eq!(text.contains("安全に取り外せます"), removed, "{status:?}");
+                for forbidden in [
+                    "電源を切りました",
+                    "完全に安全",
+                    "絶対",
+                    "何も変更",
+                    "何もしていません",
+                    "Unmount",
+                    "故障",
+                    "異常",
+                ] {
+                    assert!(!text.contains(forbidden), "{status:?}: {text}");
+                }
             }
-        }
-        assert!(!said(&removal(RemovalNotice::Removing, None)).contains("取り外せます"));
+            assert!(!said(&removal(RemovalNotice::Removing, None)).contains("取り外せます"));
+        });
     }
 
     // Worded from the status alone: no error text, object path, stage or
@@ -1321,63 +1425,69 @@ mod tests {
 
     #[test]
     fn no_available_target_says_what_to_do_without_promises() {
-        assert_eq!(
-            no_available_target(NoAvailableTarget::NoUsb),
-            (
-                "USB ドライブが見つかりません",
-                "書き込み先の USB ドライブを接続してください"
-            )
-        );
-        for state in [NoAvailableTarget::UsbInUse, NoAvailableTarget::UsbProtected] {
-            let (title, line) = no_available_target(state);
-            let said = format!("{title}\n{line}");
-            for forbidden in [
-                "見つかりません",
-                "接続してください",
-                "取り外",
-                "選べるようになります",
-                "選べます",
-            ] {
-                assert!(!said.contains(forbidden), "{state:?}: {said}");
+        crate::i18n::ja(|| {
+            assert_eq!(
+                no_available_target(NoAvailableTarget::NoUsb),
+                (
+                    "USB ドライブが見つかりません".to_string(),
+                    "書き込み先の USB ドライブを接続してください".to_string()
+                )
+            );
+            for state in [NoAvailableTarget::UsbInUse, NoAvailableTarget::UsbProtected] {
+                let (title, line) = no_available_target(state);
+                let said = format!("{title}\n{line}");
+                for forbidden in [
+                    "見つかりません",
+                    "接続してください",
+                    "取り外",
+                    "選べるようになります",
+                    "選べます",
+                ] {
+                    assert!(!said.contains(forbidden), "{state:?}: {said}");
+                }
             }
-        }
-        let (title, line) = no_available_target(NoAvailableTarget::UsbProtected);
-        assert!(!format!("{title}{line}").contains("マウント"));
-        let (_, line) = no_available_target(NoAvailableTarget::UsbInUse);
-        assert!(line.contains("マウントを解除"));
+            let (title, line) = no_available_target(NoAvailableTarget::UsbProtected);
+            assert!(!format!("{title}{line}").contains("マウント"));
+            let (_, line) = no_available_target(NoAvailableTarget::UsbInUse);
+            assert!(line.contains("マウントを解除"));
+        });
     }
 
     #[test]
     fn an_image_opened_meanwhile_is_refused_with_the_reason() {
-        let processing = open_refused(true);
-        let result = open_refused(false);
-        assert_ne!(processing, result);
-        assert!(processing.contains("処理中"), "{processing}");
-        assert!(!result.contains("処理中"), "{result}");
-        assert!(result.contains("結果画面"), "{result}");
-        // Nothing was switched, opened or queued.
-        for text in [processing, result] {
-            for misleading in ["切り替え", "開きました", "変更しました", "後で", "自動"]
-            {
-                assert!(!text.contains(misleading), "{text}");
+        crate::i18n::ja(|| {
+            let processing = open_refused(true);
+            let result = open_refused(false);
+            assert_ne!(processing, result);
+            assert!(processing.contains("処理中"), "{processing}");
+            assert!(!result.contains("処理中"), "{result}");
+            assert!(result.contains("結果画面"), "{result}");
+            // Nothing was switched, opened or queued.
+            for text in [processing, result] {
+                for misleading in ["切り替え", "開きました", "変更しました", "後で", "自動"]
+                {
+                    assert!(!text.contains(misleading), "{text}");
+                }
             }
-        }
+        });
     }
 
     #[test]
     fn marks_are_words() {
-        // Marks are words, never only an icon.
-        for mark in [
-            Mark::Waiting,
-            Mark::Active,
-            Mark::Done,
-            Mark::Skipped,
-            Mark::Cancelled,
-            Mark::Failed,
-        ] {
-            assert!(!mark_label(mark).is_empty());
-        }
-        assert_eq!(mark_label(Mark::Skipped), "なし");
+        crate::i18n::ja(|| {
+            // Marks are words, never only an icon.
+            for mark in [
+                Mark::Waiting,
+                Mark::Active,
+                Mark::Done,
+                Mark::Skipped,
+                Mark::Cancelled,
+                Mark::Failed,
+            ] {
+                assert!(!mark_label(mark).is_empty());
+            }
+            assert_eq!(mark_label(Mark::Skipped), "なし");
+        });
     }
 
     #[test]
@@ -1453,7 +1563,7 @@ mod tests {
     }
 
     // The three steps as the result view shows them: (words, icon).
-    fn result_steps(ending: Ending, mode: VerifyMode) -> [(&'static str, &'static str); 3] {
+    fn result_steps(ending: Ending, mode: VerifyMode) -> [(String, &'static str); 3] {
         let shown =
             view(ending, mode, &RemovalPresentation::<()>::Unavailable).expect("a result view");
         shown
@@ -1479,124 +1589,138 @@ mod tests {
 
     #[test]
     fn a_step_never_reached_was_not_run() {
-        // A write stopped by the user (the real Cancellation Case).
-        let steps = result_steps(
-            Ending::CancelledDuringWrite {
-                target_modified: true,
-            },
-            VerifyMode::Full,
-        );
-        assert_eq!(steps.map(|(words, _)| words), ["完了", "中止", "未実施"]);
-        assert_eq!(
-            result_steps(Ending::CancelledBeforeWrite, VerifyMode::Quick).map(|(words, _)| words),
-            ["中止", "未実施", "未実施"]
-        );
-        assert_eq!(
-            result_steps(
-                Ending::NotStarted {
-                    at: Step::Prepare,
-                    reason: Reason::TargetNotFound,
+        crate::i18n::ja(|| {
+            // A write stopped by the user (the real Cancellation Case).
+            let steps = result_steps(
+                Ending::CancelledDuringWrite {
+                    target_modified: true,
                 },
                 VerifyMode::Full,
-            )
-            .map(|(words, _)| words),
-            ["失敗", "未実施", "未実施"]
-        );
-        // Not run reads like not requested: neither still to come nor failed.
-        assert_eq!(steps[2].1, mark_icon(Mark::Skipped));
+            );
+            assert_eq!(
+                steps.clone().map(|(words, _)| words),
+                ["完了", "中止", "未実施"]
+            );
+            assert_eq!(
+                result_steps(Ending::CancelledBeforeWrite, VerifyMode::Quick)
+                    .map(|(words, _)| words),
+                ["中止", "未実施", "未実施"]
+            );
+            assert_eq!(
+                result_steps(
+                    Ending::NotStarted {
+                        at: Step::Prepare,
+                        reason: Reason::TargetNotFound,
+                    },
+                    VerifyMode::Full,
+                )
+                .map(|(words, _)| words),
+                ["失敗", "未実施", "未実施"]
+            );
+            // Not run reads like not requested: neither still to come nor failed.
+            assert_eq!(steps[2].1, mark_icon(Mark::Skipped));
+        });
     }
 
     #[test]
     fn with_verify_none_an_unreached_verify_is_none_not_unrun() {
-        for ending in [
-            Ending::WrittenWithoutVerify,
-            Ending::CancelledBeforeWrite,
-            Ending::CancelledDuringWrite {
-                target_modified: true,
-            },
-            Ending::WriteFailed {
-                reason: Reason::SyncError,
-                target_modified: true,
-            },
-        ] {
-            assert_eq!(
-                result_steps(ending, VerifyMode::None)[2].0,
-                "なし",
-                "{ending:?}"
-            );
-        }
+        crate::i18n::ja(|| {
+            for ending in [
+                Ending::WrittenWithoutVerify,
+                Ending::CancelledBeforeWrite,
+                Ending::CancelledDuringWrite {
+                    target_modified: true,
+                },
+                Ending::WriteFailed {
+                    reason: Reason::SyncError,
+                    target_modified: true,
+                },
+            ] {
+                assert_eq!(
+                    result_steps(ending, VerifyMode::None)[2].0,
+                    "なし",
+                    "{ending:?}"
+                );
+            }
+        });
     }
 
     #[test]
     fn each_final_step_state_has_its_own_short_words() {
-        let verify = |ending| result_steps(ending, VerifyMode::Full)[2].0;
-        assert_eq!(verify(Ending::Verified(VerifyMode::Full)), "完全検証完了");
-        assert_eq!(
-            result_steps(Ending::Verified(VerifyMode::Quick), VerifyMode::Quick)[2].0,
-            "クイック検証完了"
-        );
-        assert_eq!(verify(Ending::CancelledDuringVerify), "中止");
-        assert_eq!(
-            verify(Ending::VerifyFailed {
-                reason: Reason::VerifyMismatch
-            }),
-            "不一致"
-        );
-        assert_eq!(
-            verify(Ending::VerifyFailed {
-                reason: Reason::VerifyReadError
-            }),
-            "完了できず"
-        );
-        assert_eq!(
-            verify(Ending::VerifyFailed {
-                reason: Reason::VerifyOpenFailed
-            }),
-            "開始できず"
-        );
-        let write = |ending| result_steps(ending, VerifyMode::Full)[1].0;
-        assert_eq!(
-            write(Ending::WriteFailed {
-                reason: Reason::WriteError,
-                target_modified: true,
-            }),
-            "完了できず"
-        );
-        assert_eq!(
-            write(Ending::NotStarted {
-                at: Step::Write,
-                reason: Reason::AccessDenied,
-            }),
-            "開始できず"
-        );
-        assert_eq!(
-            result_steps(Ending::Lost, VerifyMode::Full).map(|(words, _)| words),
-            ["失敗"; 3]
-        );
+        crate::i18n::ja(|| {
+            let verify = |ending| result_steps(ending, VerifyMode::Full)[2].0.clone();
+            assert_eq!(verify(Ending::Verified(VerifyMode::Full)), "完全検証完了");
+            assert_eq!(
+                result_steps(Ending::Verified(VerifyMode::Quick), VerifyMode::Quick)[2]
+                    .0
+                    .clone(),
+                "クイック検証完了"
+            );
+            assert_eq!(verify(Ending::CancelledDuringVerify), "中止");
+            assert_eq!(
+                verify(Ending::VerifyFailed {
+                    reason: Reason::VerifyMismatch
+                }),
+                "不一致"
+            );
+            assert_eq!(
+                verify(Ending::VerifyFailed {
+                    reason: Reason::VerifyReadError
+                }),
+                "完了できず"
+            );
+            assert_eq!(
+                verify(Ending::VerifyFailed {
+                    reason: Reason::VerifyOpenFailed
+                }),
+                "開始できず"
+            );
+            let write = |ending| result_steps(ending, VerifyMode::Full)[1].0.clone();
+            assert_eq!(
+                write(Ending::WriteFailed {
+                    reason: Reason::WriteError,
+                    target_modified: true,
+                }),
+                "完了できず"
+            );
+            assert_eq!(
+                write(Ending::NotStarted {
+                    at: Step::Write,
+                    reason: Reason::AccessDenied,
+                }),
+                "開始できず"
+            );
+            assert_eq!(
+                result_steps(Ending::Lost, VerifyMode::Full).map(|(words, _)| words),
+                ["失敗"; 3]
+            );
+        });
     }
 
     // Under each step's name, side by side: a few words, never a sentence
     // (the result message says the rest).
     #[test]
     fn result_step_words_are_short() {
-        for case in every_case() {
-            for step in [Step::Prepare, Step::Write, Step::Verify] {
-                for mark in [
-                    Mark::Waiting,
-                    Mark::Active,
-                    Mark::Done,
-                    Mark::Skipped,
-                    Mark::Cancelled,
-                    Mark::Failed,
-                ] {
-                    let words = result_step(case, StepLine { step, mark });
-                    assert!(words.chars().count() <= 8, "{case:?} {step:?}: {words}");
-                    for sentence_like in ["。", "（", "ました", "ません"] {
-                        assert!(!words.contains(sentence_like), "{words}");
+        crate::i18n::ja(|| {
+            for case in every_case() {
+                for step in [Step::Prepare, Step::Write, Step::Verify] {
+                    for mark in [
+                        Mark::Waiting,
+                        Mark::Active,
+                        Mark::Done,
+                        Mark::Skipped,
+                        Mark::Cancelled,
+                        Mark::Failed,
+                    ] {
+                        let words = result_step(case, StepLine { step, mark });
+                        assert!(words.chars().count() <= 8, "{case:?} {step:?}: {words}");
+                        for sentence_like in ["。", "（", "ました", "ません"] {
+                            assert!(!words.contains(sentence_like), "{words}");
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     #[test]
@@ -1605,6 +1729,132 @@ mod tests {
         assert_eq!(
             result_icon(ResultKind::Cancelled),
             mark_icon(Mark::Cancelled)
+        );
+    }
+
+    // ---- English, the source language ----
+
+    fn has_japanese(text: &str) -> bool {
+        text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}'))
+    }
+
+    // Without a catalog (LANG=C, or a language with no translation) the
+    // program speaks English, and says the same things as in Japanese.
+    #[test]
+    fn english_is_complete_and_keeps_the_safety_wording() {
+        for case in every_case() {
+            let said = everything_said(case);
+            assert!(!has_japanese(&said), "{case:?}: {said}");
+            // No result speaks for Safe Removal.
+            for forbidden in ["safe", "Safe", "unplug", "Unplug", "eject", "power"] {
+                assert!(!said.contains(forbidden), "{case:?}: {said}");
+            }
+        }
+        // Verify None never claims a verified or usable drive.
+        let none = everything_said(ResultCase::WrittenWithoutVerify);
+        for forbidden in ["ready to use", "verified successfully", "verification done"] {
+            assert!(!none.contains(forbidden), "{none}");
+        }
+        assert_eq!(
+            result_message(ResultCase::WrittenWithoutVerify),
+            "The written data was not verified."
+        );
+        // A cancelled Verify is not an error; the write is complete.
+        let cancelled_verify = format!(
+            "{}\n{}",
+            result_title(ResultCase::VerifyCancelled),
+            result_message(ResultCase::VerifyCancelled)
+        );
+        for error_like in ["error", "Error", "failed", "Failed", "problem", "Problem"] {
+            assert!(!cancelled_verify.contains(error_like), "{cancelled_verify}");
+        }
+        // A failed or cancelled write warns about an incomplete image.
+        for case in [
+            ResultCase::WriteFailed {
+                reason: Reason::WriteError,
+                target_modified: true,
+            },
+            ResultCase::WriteCancelled {
+                target_modified: true,
+            },
+        ] {
+            let message = result_message(case);
+            assert!(message.contains("incomplete image"), "{message}");
+            assert!(
+                message.contains("Do not use it as a boot drive"),
+                "{message}"
+            );
+        }
+        assert_eq!(
+            result_message(ResultCase::WriteCancelled {
+                target_modified: false
+            }),
+            "Nothing was written to the USB drive."
+        );
+        // The final confirmation names the drive whose data will be erased.
+        let text = confirmation(&request(VerifyMode::Quick), "os.img", None, None);
+        assert_eq!(
+            text.warning,
+            "All data on Fresh Drive (/dev/sdq) will be erased."
+        );
+        assert_eq!(text.verify, "Quick verification");
+        assert_eq!(
+            text.image_lines,
+            vec![("Size".to_string(), "3.8 GB".to_string())]
+        );
+        // Counts and sentences read naturally.
+        assert_eq!(size(1), "1 byte");
+        assert_eq!(size(512), "512 bytes");
+        assert_eq!(exact_bytes(8_054_112_256), "8,054,112,256 bytes");
+        assert_eq!(transfer(12, 512), "12 / 512 bytes");
+        assert_eq!(
+            protection(&[RiskReason::CriticalMount, RiskReason::SystemDevice]),
+            "It is in use by the system (/, /boot or similar). It is a system disk."
+        );
+        assert_eq!(
+            no_available_target(NoAvailableTarget::UsbInUse).1,
+            "Unmount it in your file manager, then try again"
+        );
+    }
+
+    #[test]
+    fn in_english_only_removed_says_the_drive_can_be_removed() {
+        for status in every_status() {
+            let text = said(&removal(
+                RemovalNotice::Finished(status),
+                Some("General UDisk"),
+            ));
+            assert!(!has_japanese(&text), "{text}");
+            let removed = matches!(status, RemovalStatus::Removed { .. });
+            assert_eq!(
+                text.contains("can be safely removed"),
+                removed,
+                "{status:?}"
+            );
+            for forbidden in [
+                "powered off",
+                "completely safe",
+                "nothing was changed",
+                "Nothing was changed",
+                "Unmount",
+                "failure",
+                "malfunction",
+            ] {
+                assert!(!text.contains(forbidden), "{status:?}: {text}");
+            }
+        }
+        let removing = said(&removal(RemovalNotice::Removing, None));
+        assert!(!removing.contains("can be"), "{removing}");
+        assert!(removing.contains("Do not unplug"), "{removing}");
+        assert_eq!(
+            removal(
+                RemovalNotice::Finished(RemovalStatus::Removed {
+                    unmounted_filesystems: false
+                }),
+                Some("General UDisk")
+            )
+            .message,
+            "Unplug General UDisk from the computer."
         );
     }
 }

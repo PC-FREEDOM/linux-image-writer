@@ -23,6 +23,7 @@
 //   linux-image-writer [image]   (an image given here is inspected at start)
 
 mod expansion;
+mod i18n;
 mod model;
 mod operation;
 mod result;
@@ -38,6 +39,7 @@ use gtk::{gio, glib};
 const APP_ID: &str = "io.github.pc_freedom.linux-image-writer";
 
 fn main() -> glib::ExitCode {
+    i18n::init();
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)

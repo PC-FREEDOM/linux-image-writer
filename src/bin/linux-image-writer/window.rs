@@ -23,6 +23,7 @@ use linux_image_writer::{
 };
 
 use crate::expansion::{self, Panel};
+use crate::i18n::{fill, n_, tr};
 use crate::model::{
     self, CandidateLike, Eligibility, ImagePhase, SelectionOrigin, TargetChoice, TargetReturn,
     VerifyState,
@@ -158,7 +159,7 @@ struct OperationUi {
 // words, named "<step>: <state>" for assistive technologies.
 struct PhaseItem {
     item: gtk::Box,
-    name: &'static str,
+    name: String,
     icon: gtk::Image,
     state: gtk::Label,
 }
@@ -215,7 +216,7 @@ pub fn present(app: &adw::Application, image: Option<PathBuf>) {
     if ui.operation.borrow().is_none() {
         inspect(&ui, path);
     } else if let Some(message) = open_refused(&ui) {
-        ui.toasts.add_toast(adw::Toast::new(message));
+        ui.toasts.add_toast(adw::Toast::new(&message));
     }
 }
 
@@ -223,7 +224,7 @@ pub fn present(app: &adw::Application, image: Option<PathBuf>) {
 // own state: still processing (the operation, or Safe Removal), or showing
 // its result. `None` when neither (no operation, or one going straight back
 // to the main view).
-fn open_refused(ui: &Ui) -> Option<&'static str> {
+fn open_refused(ui: &Ui) -> Option<String> {
     if operation_running(ui) || removal_running(ui) {
         return Some(text::open_refused(true));
     }
@@ -252,9 +253,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .margin_end(12)
         .css_classes(["liw-sections"])
         .build();
-    content.append(&group("イメージ", &image_box));
-    content.append(&group("書き込み先", &target_box));
-    content.append(&group("書き込みオプション", &verify_box));
+    content.append(&group(&tr("Image"), &image_box));
+    content.append(&group(&tr("Target"), &target_box));
+    content.append(&group(&tr("Write Options"), &verify_box));
 
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -277,7 +278,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     warning.append(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
     warning.append(
         &gtk::Label::builder()
-            .label("書き込み先のデータはすべて消去されます。")
+            .label(tr("All data on the target will be erased."))
             .wrap(true)
             .build(),
     );
@@ -292,7 +293,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     // never an error. The final confirmation (next phase) carries the
     // destructive style.
     let write_button = gtk::Button::builder()
-        .label("USB に書き込む")
+        .label(tr("Write to USB"))
         .halign(gtk::Align::Center)
         .sensitive(false)
         .css_classes(["liw-primary", "suggested-action"])
@@ -384,15 +385,15 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             if operation_running(&ui_ref) {
                 show_cannot_close(
                     &ui_ref,
-                    "書き込み処理の実行中です",
-                    "処理が終わるまで、ウィンドウは閉じられません。中止する場合は「キャンセル」を押してください。",
+                    &tr("Writing in Progress"),
+                    &tr("The window cannot be closed until it has finished. To stop, press “Cancel”."),
                 );
                 glib::Propagation::Stop
             } else if removal_running(&ui_ref) {
                 show_cannot_close(
                     &ui_ref,
-                    "USB を安全に取り外しています",
-                    "完了するまで、ウィンドウは閉じられません。USB ドライブはまだ取り外さないでください。",
+                    &tr("Safely Removing the USB Drive"),
+                    &tr("The window cannot be closed until it has finished. Do not unplug the USB drive yet."),
                 );
                 glib::Propagation::Stop
             } else {
@@ -481,7 +482,7 @@ fn detail_row(title: &str, value: &str) -> adw::ActionRow {
     row
 }
 
-fn details(title: &str, rows: &[(&str, String)]) -> adw::ExpanderRow {
+fn details(title: &str, rows: &[(String, String)]) -> adw::ExpanderRow {
     let expander = adw::ExpanderRow::builder().build();
     expander.set_use_markup(false);
     expander.set_title(title);
@@ -559,12 +560,12 @@ fn render_all(ui: &Rc<Ui>) {
 
 fn choose_image(ui: &Rc<Ui>) {
     let images = gtk::FileFilter::new();
-    images.set_name(Some("ディスクイメージ（ISO / IMG / GZIP / XZ）"));
+    images.set_name(Some(&tr("Disk images (ISO / IMG / GZIP / XZ)")));
     for suffix in ["iso", "img", "gz", "xz"] {
         images.add_suffix(suffix);
     }
     let all = gtk::FileFilter::new();
-    all.set_name(Some("すべてのファイル"));
+    all.set_name(Some(&tr("All files")));
     all.add_pattern("*");
     let filters = gio::ListStore::new::<gtk::FileFilter>();
     filters.append(&images);
@@ -573,7 +574,7 @@ fn choose_image(ui: &Rc<Ui>) {
     // The file chooser portal inside Flatpak; the format is decided by
     // inspection, never by these filters.
     let dialog = gtk::FileDialog::builder()
-        .title("書き込むイメージを選択")
+        .title(tr("Choose an Image to Write"))
         .modal(true)
         .filters(&filters)
         .default_filter(&images)
@@ -625,7 +626,7 @@ fn inspect(ui: &Rc<Ui>, path: PathBuf) {
                 Ok(Err(error)) => failed(name, &error),
                 Err(_) => ImageState::Failed {
                     name,
-                    message: "イメージを確認できませんでした".to_string(),
+                    message: tr("The image could not be checked"),
                     detail: "inspection panicked".to_string(),
                 },
             };
@@ -662,20 +663,20 @@ fn render_image(ui: &Rc<Ui>) {
         ImageState::Missing => {
             let row = status_row(
                 "document-open-symbolic",
-                "書き込むイメージを選択",
-                "ISO / IMG / GZIP / XZ に対応しています",
+                &tr("Choose an Image to Write"),
+                &tr("ISO, IMG, GZIP and XZ are supported"),
             );
-            let button = choose("イメージを選択");
+            let button = choose(&tr("Choose Image"));
             button.add_css_class("suggested-action");
             row.add_suffix(&button);
             rows.append(&row);
         }
         ImageState::Inspecting { name } => {
-            let row = row("イメージを確認しています…", name);
+            let row = row(&tr("Checking the image…"), name);
             let spinner = gtk::Spinner::builder().spinning(true).build();
-            spinner.update_property(&[gtk::accessible::Property::Label("確認中")]);
+            spinner.update_property(&[gtk::accessible::Property::Label(&tr("Checking"))]);
             row.add_prefix(&spinner);
-            row.add_suffix(&choose("別のイメージを選択"));
+            row.add_suffix(&choose(&tr("Choose Another Image")));
             rows.append(&row);
         }
         ImageState::Ready { name, info, .. } => {
@@ -687,9 +688,10 @@ fn render_image(ui: &Rc<Ui>) {
                 text::image_kind(info.compression())
             );
             if info.compression().is_some() {
-                summary.push_str(
-                    "\n展開しながら USB に書き込みます（書き込みサイズは準備時に確認します）",
-                );
+                summary.push('\n');
+                summary.push_str(&tr(
+                    "It is decompressed while it is written to USB (the write size is checked during preparation)",
+                ));
             }
             let verify = |mode| match info.verify_availability(mode) {
                 VerifyAvailability::Available => "Available".to_string(),
@@ -701,35 +703,39 @@ fn render_image(ui: &Rc<Ui>) {
                 name,
                 &[
                     (
-                        "圧縮 (Compression)",
+                        tr("Compression"),
                         text::compression_name(info.compression()).to_string(),
                     ),
-                    ("ファイルサイズ", text::exact_bytes(info.file_size())),
+                    (tr("File size"), text::exact_bytes(info.file_size())),
                     (
-                        "書き込みサイズ",
+                        tr("Write size"),
                         info.logical_size()
                             .map(text::exact_bytes)
-                            .unwrap_or_else(|| "準備時に確認（Preflight）".to_string()),
+                            .unwrap_or_else(|| tr("Checked during preparation (Preflight)")),
                     ),
-                    ("Access", text::access_name(info.access()).to_string()),
-                    ("Quick Verify", verify(VerifyMode::Quick)),
-                    ("Full Verify", verify(VerifyMode::Full)),
-                    ("Verify なし", verify(VerifyMode::None)),
                     (
-                        "Verify の可否について",
-                        text::verify_availability_note().to_string(),
+                        "Access".to_string(),
+                        text::access_name(info.access()).to_string(),
                     ),
-                    ("アーキテクチャ / ブート方式", "Not detected".to_string()),
+                    ("Quick Verify".to_string(), verify(VerifyMode::Quick)),
+                    ("Full Verify".to_string(), verify(VerifyMode::Full)),
+                    (tr("No Verify"), verify(VerifyMode::None)),
+                    (
+                        tr("About Verify availability"),
+                        text::verify_availability_note(),
+                    ),
+                    (tr("Architecture / boot method"), "Not detected".to_string()),
                 ],
             );
             expander.set_subtitle(&summary);
             expander.set_subtitle_lines(0);
             let ok = gtk::Image::from_icon_name("emblem-ok-symbolic");
-            ok.set_tooltip_text(Some("書き込みできます"));
-            ok.update_property(&[gtk::accessible::Property::Label("書き込みできます")]);
+            let writable = tr("Can be written");
+            ok.set_tooltip_text(Some(&writable));
+            ok.update_property(&[gtk::accessible::Property::Label(&writable)]);
             expander.add_prefix(&ok);
-            expander.add_suffix(&choose("変更"));
-            expander.set_tooltip_text(Some("開くと技術情報を表示します"));
+            expander.add_suffix(&choose(&tr("Change")));
+            expander.set_tooltip_text(Some(&tr("Open to show technical details")));
             attach_panel(ui, Panel::ImageDetails, &expander);
             rows.append(&expander);
         }
@@ -739,12 +745,12 @@ fn render_image(ui: &Rc<Ui>) {
             detail,
         } => {
             let expander = details(
-                "このイメージは書き込めません",
-                &[("エラー", detail.clone())],
+                &tr("This image cannot be written"),
+                &[(tr("Error"), detail.clone())],
             );
             expander.set_subtitle(&format!("{name} — {message}"));
             expander.add_prefix(&gtk::Image::from_icon_name("dialog-error-symbolic"));
-            expander.add_suffix(&choose("別のイメージを選択"));
+            expander.add_suffix(&choose(&tr("Choose Another Image")));
             attach_panel(ui, Panel::ImageDetails, &expander);
             rows.append(&expander);
         }
@@ -835,7 +841,7 @@ struct TargetView {
     image_ready: bool,
     loading: bool,
     failure: Option<String>,
-    cleared: Option<&'static str>,
+    cleared: Option<String>,
     available: Vec<EntryView>,
     too_small: Vec<EntryView>,
     protected: Vec<EntryView>,
@@ -843,7 +849,7 @@ struct TargetView {
     no_available: model::NoAvailableTarget,
     selected: Option<usize>,
     auto: bool,
-    details: Vec<(&'static str, String)>,
+    details: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -893,7 +899,7 @@ fn target_view(state: &State) -> TargetView {
             Eligibility::TooSmall { shortfall } => view.too_small.push(EntryView {
                 index,
                 title,
-                subtitle: format!("{place} · 容量が {} 不足しています", text::size(shortfall)),
+                subtitle: format!("{place} · {}", text::shortfall(shortfall)),
             }),
             Eligibility::Protected => view.protected.push(EntryView {
                 index,
@@ -920,10 +926,10 @@ fn target_view(state: &State) -> TargetView {
 
 // The selected device's technical details, as the library reports them
 // (the serial number is left out).
-fn target_details(candidate: &DeviceCandidate) -> Vec<(&'static str, String)> {
+fn target_details(candidate: &DeviceCandidate) -> Vec<(String, String)> {
     let display = candidate.display();
     let assessment = candidate.assessment();
-    let yes_no = |value: bool| if value { "はい" } else { "いいえ" }.to_string();
+    let yes_no = |value: bool| if value { tr("Yes") } else { tr("No") };
     let reasons = assessment
         .reasons
         .iter()
@@ -932,36 +938,36 @@ fn target_details(candidate: &DeviceCandidate) -> Vec<(&'static str, String)> {
         .join(", ");
     let (major, minor) = candidate.major_minor();
     vec![
-        ("デバイス", display.device.clone()),
-        ("ベンダー", display.vendor.clone()),
-        ("モデル", display.model.clone()),
-        ("容量", text::exact_bytes(display.size)),
-        ("接続", text::bus(&display.connection_bus)),
-        ("リムーバブル", yes_no(display.removable)),
-        ("書き込み可能", yes_no(assessment.writable)),
+        (tr("Device"), display.device.clone()),
+        (tr("Vendor"), display.vendor.clone()),
+        (tr("Model"), display.model.clone()),
+        (tr("Capacity"), text::exact_bytes(display.size)),
+        (tr("Connection"), text::bus(&display.connection_bus)),
+        (tr("Removable"), yes_no(display.removable)),
+        (tr("Writable"), yes_no(assessment.writable)),
         (
-            "Safety",
+            "Safety".to_string(),
             format!(
                 "{} ({reasons})",
                 text::risk_level_name(&assessment.risk_level)
             ),
         ),
         (
-            "マウント",
+            tr("Mounts"),
             if display.mount_points.is_empty() {
-                "なし".to_string()
+                tr("None")
             } else {
                 display.mount_points.join(", ")
             },
         ),
         (
-            "diskseq",
+            "diskseq".to_string(),
             candidate
                 .diskseq()
                 .map(|seq| seq.to_string())
-                .unwrap_or_else(|| "不明".to_string()),
+                .unwrap_or_else(|| tr("Unknown")),
         ),
-        ("major:minor", format!("{major}:{minor}")),
+        ("major:minor".to_string(), format!("{major}:{minor}")),
     ]
 }
 
@@ -977,13 +983,16 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
         let rows = list();
         rows.append(&status_row(
             "dialog-error-symbolic",
-            text::candidate_list_error_message(),
-            "しばらくすると自動的に再試行します",
+            &text::candidate_list_error_message(),
+            &tr("Retrying automatically in a moment"),
         ));
-        rows.append(&details("技術情報", &[("エラー", detail.clone())]));
+        rows.append(&details(
+            &tr("Technical details"),
+            &[(tr("Error"), detail.clone())],
+        ));
         ui.target_box.append(&rows);
     }
-    if let Some(cleared) = view.cleared {
+    if let Some(cleared) = &view.cleared {
         let rows = list();
         rows.append(&status_row("dialog-warning-symbolic", cleared, ""));
         ui.target_box.append(&rows);
@@ -992,30 +1001,31 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
     if view.available.is_empty() {
         let rows = list();
         if view.loading {
-            let row = row("USB ドライブを探しています…", "");
+            let row = row(&tr("Looking for USB drives…"), "");
             let spinner = gtk::Spinner::builder().spinning(true).build();
-            spinner.update_property(&[gtk::accessible::Property::Label("検索中")]);
+            spinner.update_property(&[gtk::accessible::Property::Label(&tr("Searching"))]);
             row.add_prefix(&spinner);
             rows.append(&row);
         } else if view.too_small.is_empty() {
             let (title, line) = text::no_available_target(view.no_available);
-            rows.append(&status_row("drive-removable-media-symbolic", title, line));
+            rows.append(&status_row("drive-removable-media-symbolic", &title, &line));
         } else {
             rows.append(&status_row(
                 "drive-removable-media-symbolic",
-                "このイメージを書き込める USB ドライブがありません",
-                "容量の大きい USB ドライブを接続してください",
+                &tr("No USB drive is large enough for this image"),
+                &tr("Connect a USB drive with more capacity"),
             ));
         }
         append_protected(ui, &rows, &view);
         ui.target_box.append(&rows);
     } else {
         if !view.image_ready {
-            ui.target_box
-                .append(&caption("イメージを選択した後に書き込み先を確認します"));
+            ui.target_box.append(&caption(&tr(
+                "The target is checked once an image is chosen",
+            )));
         } else if view.selected.is_none() && view.available.len() > 1 {
             ui.target_box
-                .append(&caption("書き込み先の USB ドライブを選択してください"));
+                .append(&caption(&tr("Choose the USB drive to write to")));
         }
         let rows = list();
         for entry in &view.available {
@@ -1044,19 +1054,19 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
             // from an earlier image (while another one is inspected or was
             // refused) is still shown as chosen.
             let note = match (view.image_ready, selected) {
-                (true, true) if view.auto => Some("自動的に選択しました"),
+                (true, true) if view.auto => Some(tr("Selected automatically")),
                 (true, _) => None,
-                (false, true) => Some("選択中"),
-                (false, false) => Some("検出済み"),
+                (false, true) => Some(tr("Selected")),
+                (false, false) => Some(tr("Detected")),
             };
             if selected && !view.details.is_empty() {
                 let expander = details(&entry.title, &view.details);
                 expander.set_subtitle(&entry.subtitle);
                 expander.add_prefix(&prefix);
                 if let Some(note) = note {
-                    expander.add_suffix(&tag(note));
+                    expander.add_suffix(&tag(&note));
                 }
-                expander.set_tooltip_text(Some("開くとデバイスの詳細を表示します"));
+                expander.set_tooltip_text(Some(&tr("Open to show device details")));
                 attach_panel(ui, Panel::TargetDetails, &expander);
                 rows.append(&expander);
             } else {
@@ -1066,7 +1076,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                     row.set_activatable_widget(Some(check));
                 }
                 if let Some(note) = note {
-                    row.add_suffix(&tag(note));
+                    row.add_suffix(&tag(&note));
                 }
                 rows.append(&row);
             }
@@ -1076,7 +1086,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
     }
 
     if !view.too_small.is_empty() {
-        ui.target_box.append(&caption("容量不足"));
+        ui.target_box.append(&caption(&tr("Too small")));
         let rows = list();
         for entry in &view.too_small {
             let row = status_row(
@@ -1101,15 +1111,16 @@ fn append_protected(ui: &Rc<Ui>, rows: &gtk::ListBox, view: &TargetView) {
     }
     let expander = adw::ExpanderRow::builder().build();
     expander.set_use_markup(false);
-    expander.set_title(&format!(
-        "保護されているデバイス（{}）",
-        view.protected.len()
+    expander.set_title(&fill(
+        tr("Protected devices ({count})"),
+        &[("count", &view.protected.len().to_string())],
     ));
     let lock = gtk::Image::from_icon_name("changes-prevent-symbolic");
-    lock.update_property(&[gtk::accessible::Property::Label("保護")]);
+    lock.update_property(&[gtk::accessible::Property::Label(&tr("Protected"))]);
     expander.add_prefix(&lock);
-    expander.set_tooltip_text(Some("安全のため、書き込み先には選べません"));
-    expander.add_row(&caption_row("安全のため、書き込み先には選べません"));
+    let not_selectable = tr("Cannot be chosen as the target, for safety");
+    expander.set_tooltip_text(Some(&not_selectable));
+    expander.add_row(&caption_row(&not_selectable));
     for entry in &view.protected {
         expander.add_row(&row(&entry.title, &entry.subtitle));
     }
@@ -1146,14 +1157,15 @@ fn render_verify(ui: &Rc<Ui>) {
     let info = state.image.info();
     ui.verify_box.append(
         &gtk::Label::builder()
-            .label("検証")
+            .label(tr("Verification"))
             .xalign(0.0)
             .css_classes(["heading"])
             .build(),
     );
     if info.is_none() {
-        ui.verify_box
-            .append(&caption("イメージを選択すると検証方法を設定できます"));
+        ui.verify_box.append(&caption(&tr(
+            "Choose an image to set the verification mode",
+        )));
     }
 
     // All three choices are always shown; only the selected one is
@@ -1168,23 +1180,29 @@ fn render_verify(ui: &Rc<Ui>) {
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
             .build();
-        label.append(&gtk::Label::new(Some(text::verify_title(mode))));
-        let mut accessible = text::verify_title(mode).to_string();
+        label.append(&gtk::Label::new(Some(&text::verify_title(mode))));
+        let mut accessible = text::verify_title(mode);
         if mode == VerifyMode::Quick {
             label.append(
                 &gtk::Label::builder()
-                    .label("おすすめ")
+                    .label(tr("Recommended"))
                     .valign(gtk::Align::Center)
                     .css_classes(["caption", "accent"])
                     .build(),
             );
-            accessible.push_str("（おすすめ）");
+            accessible = fill(tr("{mode} (recommended)"), &[("mode", &accessible)]);
         }
         let check = gtk::CheckButton::builder().child(&label).build();
         if let Some(VerifyAvailability::Unavailable(reason)) = availability {
-            label.append(&tag(text::verify_unavailable_short(reason)));
-            check.set_tooltip_text(Some(text::verify_unavailable(reason)));
-            accessible = format!("{accessible}。{}", text::verify_unavailable(reason));
+            label.append(&tag(&text::verify_unavailable_short(reason)));
+            check.set_tooltip_text(Some(&text::verify_unavailable(reason)));
+            accessible = fill(
+                tr("{label}. {reason}"),
+                &[
+                    ("label", &accessible),
+                    ("reason", &text::verify_unavailable(reason)),
+                ],
+            );
         }
         check.update_property(&[gtk::accessible::Property::Label(&accessible)]);
         check.set_group(Some(&ui.verify_group));
@@ -1203,7 +1221,7 @@ fn render_verify(ui: &Rc<Ui>) {
     if let Some(help) = text::verify_help(info.is_some(), state.verify.mode) {
         ui.verify_box.append(
             &gtk::Label::builder()
-                .label(help)
+                .label(&help)
                 .wrap(true)
                 .xalign(0.0)
                 .css_classes(["dim-label"])
@@ -1317,8 +1335,10 @@ fn start_operation(ui: &Rc<Ui>) {
             drop(state);
             show_message(
                 ui,
-                "このイメージは書き込めません",
-                "ファイル名またはフォルダー名に、扱えない文字が含まれています。名前を変更してから選び直してください。",
+                &tr("This image cannot be written"),
+                &tr(
+                    "The file or folder name contains characters that cannot be handled. Rename it, then choose it again.",
+                ),
             );
             return;
         };
@@ -1332,8 +1352,11 @@ fn start_operation(ui: &Rc<Ui>) {
         Err(error) => {
             show_message(
                 ui,
-                "書き込み処理を開始できませんでした",
-                &format!("USB ドライブには何も書き込んでいません。\n（{error}）"),
+                &tr("The Write Operation Could Not Be Started"),
+                &fill(
+                    tr("Nothing was written to the USB drive.\n({error})"),
+                    &[("error", &error.to_string())],
+                ),
             );
             return;
         }
@@ -1447,7 +1470,9 @@ fn finish(ui: &Rc<Ui>, outcome: Option<OperationOutcome>) {
         if ending.returns_to_main() {
             back_to_main(
                 &ui_ref,
-                Some("書き込みを中止しました。USB ドライブには何も書き込んでいません。"),
+                Some(&tr(
+                    "Writing cancelled. Nothing was written to the USB drive.",
+                )),
             );
         } else {
             render_operation(&ui_ref);
@@ -1619,20 +1644,20 @@ fn show_confirmation(ui: &Rc<Ui>, request: &WorkerConfirmationRequest) {
             .wrap(true)
             .build()
     };
-    body.append(&section("イメージ"));
+    body.append(&section(&tr("Image")));
     body.append(&strong(&content.image_name));
     for (label, value) in &content.image_lines {
         body.append(&plain(&format!("{label}: {value}")));
     }
     let arrow = gtk::Image::from_icon_name("go-down-symbolic");
     arrow.set_margin_top(4);
-    arrow.update_property(&[gtk::accessible::Property::Label("書き込み先へ")]);
+    arrow.update_property(&[gtk::accessible::Property::Label(&tr("To the target"))]);
     body.append(&arrow);
-    body.append(&section("書き込み先"));
+    body.append(&section(&tr("Target")));
     body.append(&strong(&content.target_name));
     body.append(&plain(&content.target_line));
-    body.append(&section("検証"));
-    body.append(&plain(content.verify));
+    body.append(&section(&tr("Verification")));
+    body.append(&plain(&content.verify));
     let warning = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -1649,10 +1674,10 @@ fn show_confirmation(ui: &Rc<Ui>, request: &WorkerConfirmationRequest) {
     );
     body.append(&warning);
 
-    let dialog = adw::AlertDialog::new(Some("USB への書き込みを開始しますか？"), None);
+    let dialog = adw::AlertDialog::new(Some(&tr("Start Writing to USB?")), None);
     dialog.set_extra_child(Some(&body));
-    dialog.add_response(operation::CONFIRM_RESPONSE_CANCEL, "キャンセル");
-    dialog.add_response(operation::CONFIRM_RESPONSE_WRITE, "USB に書き込む");
+    dialog.add_response(operation::CONFIRM_RESPONSE_CANCEL, &tr("Cancel"));
+    dialog.add_response(operation::CONFIRM_RESPONSE_WRITE, &tr("Write to USB"));
     dialog.set_response_appearance(
         operation::CONFIRM_RESPONSE_WRITE,
         adw::ResponseAppearance::Destructive,
@@ -1734,11 +1759,13 @@ fn request_cancel(ui: &Rc<Ui>) {
 // Once the write may have started, stopping it is confirmed once.
 fn ask_to_stop_writing(ui: &Rc<Ui>) {
     let dialog = adw::AlertDialog::new(
-        Some("書き込みを中止しますか？"),
-        Some("中止すると、USB ドライブには不完全なイメージが残る可能性があります。"),
+        Some(&tr("Stop Writing?")),
+        Some(&tr(
+            "If you stop, the USB drive may be left with an incomplete image.",
+        )),
     );
-    dialog.add_response("continue", "書き込みを続ける");
-    dialog.add_response("stop", "中止する");
+    dialog.add_response("continue", &tr("Continue Writing"));
+    dialog.add_response("stop", &tr("Stop"));
     dialog.set_response_appearance("stop", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("continue"));
     dialog.set_close_response("continue");
@@ -1776,7 +1803,7 @@ fn show_cannot_close(ui: &Rc<Ui>, heading: &str, body: &str) {
 
 fn show_message(ui: &Rc<Ui>, heading: &str, body: &str) -> adw::AlertDialog {
     let dialog = adw::AlertDialog::new(Some(heading), Some(body));
-    dialog.add_response("close", "閉じる");
+    dialog.add_response("close", &tr("Close"));
     dialog.set_default_response(Some("close"));
     dialog.set_close_response("close");
     dialog.present(Some(&ui.window));
@@ -1785,20 +1812,22 @@ fn show_message(ui: &Rc<Ui>, heading: &str, body: &str) -> adw::AlertDialog {
 
 // ---- The operation view ----
 
+// Translated where they are shown; "major:minor" and "diskseq" are
+// technical names, shown as they are.
 const DETAIL_NAMES: [&str; 13] = [
-    "イメージ",
-    "圧縮 (Compression)",
-    "書き込みサイズ",
-    "書き込み先",
-    "デバイス",
-    "UDisks2 オブジェクト",
+    n_("Image"),
+    n_("Compression"),
+    n_("Write size"),
+    n_("Target"),
+    n_("Device"),
+    n_("UDisks2 object"),
     "major:minor",
     "diskseq",
-    "検証",
-    "現在の段階",
-    "書き込み済み",
-    "検証済み",
-    "結果 (Outcome)",
+    n_("Verification"),
+    n_("Current stage"),
+    n_("Written"),
+    n_("Verified"),
+    n_("Outcome"),
 ];
 
 fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
@@ -1816,7 +1845,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .build();
     let title = centered(&["title-2"]);
     let spinner = gtk::Spinner::builder().spinning(true).build();
-    spinner.update_property(&[gtk::accessible::Property::Label("処理中")]);
+    spinner.update_property(&[gtk::accessible::Property::Label(&tr("Processing"))]);
     let status = centered(&["heading"]);
     let status_line = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -1830,7 +1859,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     let image = centered(&["heading"]);
     image.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     let arrow = gtk::Image::from_icon_name("go-down-symbolic");
-    arrow.update_property(&[gtk::accessible::Property::Label("書き込み先へ")]);
+    arrow.update_property(&[gtk::accessible::Property::Label(&tr("To the target"))]);
     let target = centered(&[]);
     let flow = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1873,7 +1902,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             heading.append(&icon);
             heading.append(
                 &gtk::Label::builder()
-                    .label(name)
+                    .label(&name)
                     .css_classes(["heading"])
                     .build(),
             );
@@ -1914,7 +1943,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         let status = row("", "");
         status.set_subtitle_lines(0);
         let spinner = gtk::Spinner::builder().spinning(true).build();
-        spinner.update_property(&[gtk::accessible::Property::Label("処理中")]);
+        spinner.update_property(&[gtk::accessible::Property::Label(&tr("Processing"))]);
         let icon = gtk::Image::new();
         status.add_prefix(&spinner);
         status.add_prefix(&icon);
@@ -1933,11 +1962,11 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     let details_list = list();
     let expander = adw::ExpanderRow::builder().build();
     expander.set_use_markup(false);
-    expander.set_title("技術情報");
+    expander.set_title(&tr("Technical details"));
     let details = DETAIL_NAMES
         .iter()
         .map(|name| {
-            let row = detail_row(name, "");
+            let row = detail_row(&tr(name), "");
             expander.add_row(&row);
             row
         })
@@ -1980,7 +2009,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .build();
 
     let cancel = gtk::Button::builder()
-        .label("キャンセル")
+        .label(tr("Cancel"))
         .halign(gtk::Align::Center)
         .css_classes(["liw-action"])
         .build();
@@ -2063,7 +2092,7 @@ fn render_operation(ui: &Ui) {
     op.image.set_text(&operation.image_name);
     op.target.set_text(&match &tracker.target {
         Some(target) => text::target_summary(target),
-        None => "書き込み先を確認しています…".to_string(),
+        None => tr("Checking the target…"),
     });
 
     // The result view, once the outcome is joined (a declined confirmation
@@ -2075,7 +2104,7 @@ fn render_operation(ui: &Ui) {
 
     // The same row of steps while running and on the result: where each
     // step is now, or how it ended.
-    let steps: [(&str, &str, &str); 3] = match &view {
+    let steps: [(String, &str, &str); 3] = match &view {
         None => tracker.marks().map(|mark| {
             (
                 text::mark_label(mark),
@@ -2093,7 +2122,7 @@ fn render_operation(ui: &Ui) {
     };
     for (phase, (state, icon, style)) in op.phase_items.iter().zip(steps) {
         phase.icon.set_icon_name(Some(icon));
-        phase.state.set_text(state);
+        phase.state.set_text(&state);
         set_style(&phase.item, &PHASE_STYLES, Some(style));
         phase
             .item
@@ -2106,11 +2135,11 @@ fn render_operation(ui: &Ui) {
     match &view {
         None => {
             let (status, note) = text::activity(tracker);
-            op.title.set_text(text::headline(tracker.step()));
-            op.status.set_text(status);
+            op.title.set_text(&text::headline(tracker.step()));
+            op.status.set_text(&status);
             op.status.set_visible(!status.is_empty());
             op.spinner.set_visible(!status.is_empty());
-            op.note.set_text(note);
+            op.note.set_text(&note);
             op.note.set_visible(!note.is_empty());
             match tracker.transfer() {
                 Some(transfer) => {
@@ -2146,7 +2175,7 @@ fn render_operation(ui: &Ui) {
             op.icon.set_icon_name(Some(text::result_icon(view.kind)));
             set_style(&op.icon, &SEMANTIC_STYLES, result_style(view.kind));
             op.icon.set_visible(true);
-            op.title.set_text(text::result_title(view.case));
+            op.title.set_text(&text::result_title(view.case));
             op.status.set_visible(false);
             op.spinner.set_visible(false);
             op.note.set_visible(false);
@@ -2186,7 +2215,7 @@ fn render_operation(ui: &Ui) {
         op.cancel.set_sensitive(false);
     }
 
-    let pending = "確認中".to_string();
+    let pending = tr("Checking");
     let values = [
         operation.image_name.clone(),
         match tracker.compression {
@@ -2215,26 +2244,26 @@ fn render_operation(ui: &Ui) {
         tracker
             .major_minor
             .map(|(major, minor)| format!("{major}:{minor}"))
-            .unwrap_or_else(|| "未取得".to_string()),
+            .unwrap_or_else(|| tr("Not available")),
         tracker
             .diskseq
             .map(|seq| seq.to_string())
-            .unwrap_or_else(|| "不明".to_string()),
-        text::verify_title(tracker.verify_mode).to_string(),
+            .unwrap_or_else(|| tr("Unknown")),
+        text::verify_title(tracker.verify_mode),
         format!("{:?}", tracker.activity),
         tracker
             .written
             .map(|written| text::exact_bytes(written.done))
-            .unwrap_or_else(|| "0 バイト".to_string()),
+            .unwrap_or_else(|| text::exact_bytes(0)),
         tracker
             .verified
             .map(|verified| text::exact_bytes(verified.done))
-            .unwrap_or_else(|| "0 バイト".to_string()),
+            .unwrap_or_else(|| text::exact_bytes(0)),
         operation
             .ended
             .as_ref()
             .map(|(_, detail)| detail.clone())
-            .unwrap_or_else(|| "実行中".to_string()),
+            .unwrap_or_else(|| tr("Running")),
     ];
     for (row, value) in op.details.iter().zip(values) {
         row.set_subtitle(&value);
@@ -2253,7 +2282,7 @@ fn render_removal(
         return;
     };
     let words = text::removal(notice, target_name);
-    ui.status.set_title(words.title);
+    ui.status.set_title(&words.title);
     ui.status.set_subtitle(&words.message);
     let removed = matches!(
         notice,
@@ -2278,7 +2307,7 @@ fn render_removal(
     }
     match words.extra {
         Some(extra) => {
-            ui.extra.set_title(extra);
+            ui.extra.set_title(&extra);
             ui.extra.set_visible(true);
         }
         None => ui.extra.set_visible(false),

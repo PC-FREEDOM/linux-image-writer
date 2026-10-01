@@ -1,0 +1,1142 @@
+# Japanese translation of Linux Image Writer.
+# This file is distributed under the same license as the linux-image-writer package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: linux-image-writer 0.1.0\n"
+"Report-Msgid-Bugs-To: https://github.com/PC-FREEDOM/linux-image-writer/"
+"issues\n"
+"POT-Creation-Date: 2026-10-02 00:03+0900\n"
+"PO-Revision-Date: 2026-10-02 00:00+0900\n"
+"Last-Translator: PC-FREEDOM\n"
+"Language-Team: Japanese\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src/bin/linux-image-writer/text.rs:25
+#, rust-format
+msgid "{bytes} byte"
+msgid_plural "{bytes} bytes"
+msgstr[0] "{bytes} バイト"
+
+#: src/bin/linux-image-writer/text.rs:51
+#, rust-format
+msgid "{done} / {total} byte"
+msgid_plural "{done} / {total} bytes"
+msgstr[0] "{done} / {total} バイト"
+
+#: src/bin/linux-image-writer/text.rs:86
+msgid "Uncompressed image"
+msgstr "非圧縮イメージ"
+
+#: src/bin/linux-image-writer/text.rs:87
+msgid "GZIP-compressed image"
+msgstr "GZIP 圧縮イメージ"
+
+#: src/bin/linux-image-writer/text.rs:88
+msgid "XZ-compressed image"
+msgstr "XZ 圧縮イメージ"
+
+#: src/bin/linux-image-writer/text.rs:111
+msgid "File not found"
+msgstr "ファイルが見つかりません"
+
+#: src/bin/linux-image-writer/text.rs:112
+msgid "No permission to read the file"
+msgstr "ファイルを読み取る権限がありません"
+
+#: src/bin/linux-image-writer/text.rs:113
+msgid "The file could not be read"
+msgstr "ファイルを読み取れませんでした"
+
+#: src/bin/linux-image-writer/text.rs:116
+msgid "Not a regular file (folders and devices cannot be chosen)"
+msgstr "通常のファイルではありません（フォルダーやデバイスは選べません）"
+
+#: src/bin/linux-image-writer/text.rs:119
+#, rust-format
+msgid "{format}-compressed files are not supported"
+msgstr "{format} 形式の圧縮ファイルには対応していません"
+
+#: src/bin/linux-image-writer/text.rs:123
+#, rust-format
+msgid ""
+"The file name indicates {format} compression, but the contents do not match"
+msgstr "ファイル名は {format} 圧縮を示していますが、内容が一致しません"
+
+#: src/bin/linux-image-writer/text.rs:133
+msgid "Unknown connection"
+msgstr "接続方式不明"
+
+#: src/bin/linux-image-writer/text.rs:148
+msgid "Unnamed device"
+msgstr "名前のないデバイス"
+
+#: src/bin/linux-image-writer/text.rs:157
+msgid "It is a system disk."
+msgstr "システムのディスクです。"
+
+#: src/bin/linux-image-writer/text.rs:158
+msgid "It is in use by the system (/, /boot or similar)."
+msgstr "システム領域（/ や /boot など）が使用しています。"
+
+#: src/bin/linux-image-writer/text.rs:159
+msgid "It is in use as swap."
+msgstr "スワップとして使用中です。"
+
+#: src/bin/linux-image-writer/text.rs:160
+msgid "It is part of an LVM, RAID or encrypted setup."
+msgstr "LVM・RAID・暗号化などの構成に含まれています。"
+
+#: src/bin/linux-image-writer/text.rs:161
+msgid "It is mounted."
+msgstr "マウントされています。"
+
+#: src/bin/linux-image-writer/text.rs:162
+msgid "It is read-only."
+msgstr "読み取り専用です。"
+
+#: src/bin/linux-image-writer/text.rs:163
+msgid "The system has set it to be hidden."
+msgstr "システムが非表示に設定しています。"
+
+#: src/bin/linux-image-writer/text.rs:164
+msgid "It is a device that cannot be partitioned."
+msgstr "パーティションを作成できないデバイスです。"
+
+#: src/bin/linux-image-writer/text.rs:165
+msgid "It is a removable USB device."
+msgstr "USB のリムーバブルデバイスです。"
+
+#: src/bin/linux-image-writer/text.rs:167
+msgid "It could not be confirmed to be a removable USB device."
+msgstr "USB のリムーバブルデバイスと確認できません。"
+
+#: src/bin/linux-image-writer/text.rs:169
+msgid "No media is inserted."
+msgstr "メディアが挿入されていません。"
+
+#: src/bin/linux-image-writer/text.rs:182
+#, rust-format
+msgid "{sentences} {next_sentence}"
+msgstr "{sentences}{next_sentence}"
+
+#: src/bin/linux-image-writer/text.rs:186
+msgid "It cannot be chosen, for safety."
+msgstr "安全のため選択できません。"
+
+#: src/bin/linux-image-writer/text.rs:203
+msgid "No USB drive found"
+msgstr "USB ドライブが見つかりません"
+
+#: src/bin/linux-image-writer/text.rs:204
+msgid "Connect the USB drive to write to"
+msgstr "書き込み先の USB ドライブを接続してください"
+
+#: src/bin/linux-image-writer/text.rs:207
+msgid "The connected USB drive is in use and cannot be chosen"
+msgstr "接続されている USB ドライブは使用中のため選べません"
+
+#: src/bin/linux-image-writer/text.rs:208
+msgid "Unmount it in your file manager, then try again"
+msgstr "ファイルマネージャーでマウントを解除してから、もう一度お試しください"
+
+#: src/bin/linux-image-writer/text.rs:211
+msgid "The connected USB drive cannot be chosen as the target"
+msgstr "接続されている USB ドライブは書き込み先に選べません"
+
+#: src/bin/linux-image-writer/text.rs:212
+msgid "See “Protected devices” for the reason"
+msgstr "理由は「保護されているデバイス」で確認できます"
+
+#: src/bin/linux-image-writer/text.rs:222
+msgid ""
+"Another image cannot be opened while processing. Try again once it has "
+"finished"
+msgstr ""
+"処理中のため、別のイメージは開けません。処理が終わってから、もう一度お試しく"
+"ださい"
+
+#: src/bin/linux-image-writer/text.rs:224
+msgid "Close the result view, then try again"
+msgstr "結果画面を閉じてから、もう一度お試しください"
+
+#: src/bin/linux-image-writer/text.rs:230
+msgid "The device list could not be read"
+msgstr "デバイスの一覧を取得できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:238
+msgid "The selected USB drive can no longer be found. Choose the target again."
+msgstr ""
+"選択していた USB ドライブが見つからなくなりました。書き込み先を選び直してくだ"
+"さい。"
+
+#: src/bin/linux-image-writer/text.rs:241
+msgid ""
+"The selected USB drive cannot be chosen at the moment. Choose the target "
+"again."
+msgstr ""
+"選択していた USB ドライブは現在選択できません。書き込み先を選び直してくださ"
+"い。"
+
+#: src/bin/linux-image-writer/text.rs:244
+msgid ""
+"The selected USB drive is too small for this image. Choose the target again."
+msgstr ""
+"選択していた USB ドライブはこのイメージには容量が足りません。書き込み先を選び"
+"直してください。"
+
+#: src/bin/linux-image-writer/text.rs:254
+msgid "Quick verification"
+msgstr "クイック検証"
+
+#: src/bin/linux-image-writer/text.rs:255
+msgid "Full verification"
+msgstr "完全検証"
+
+#: src/bin/linux-image-writer/text.rs:256
+msgid "No verification"
+msgstr "検証なし"
+
+#: src/bin/linux-image-writer/text.rs:262
+msgid "After writing, part of the data is read back and checked."
+msgstr "書き込み後、一部を読み戻して確認します。"
+
+#: src/bin/linux-image-writer/text.rs:264
+msgid ""
+"All of the written data is read back and checked.\n"
+"This takes longer than quick verification."
+msgstr ""
+"書き込んだデータをすべて読み戻して確認します。\n"
+"クイック検証より時間がかかります。"
+
+#: src/bin/linux-image-writer/text.rs:266
+msgid "The written data is not read back and checked."
+msgstr "書き込み後の読み戻し確認は行われません。"
+
+#: src/bin/linux-image-writer/text.rs:279
+msgid "Not available for this image"
+msgstr "このイメージでは利用できません"
+
+#: src/bin/linux-image-writer/text.rs:287
+msgid ""
+"Images in this format cannot be read from an arbitrary position, so quick "
+"verification, which reads back parts of the image, is not available"
+msgstr ""
+"この形式のイメージは任意の位置から読み取れないため、一部を読み戻すクイック検"
+"証は利用できません"
+
+#: src/bin/linux-image-writer/text.rs:296
+msgid ""
+"Based on the image format. Verification itself can still fail when it runs, "
+"depending on the state of the device"
+msgstr ""
+"イメージの形式による判定です。検証そのものは、実行時にデバイスの状態によって"
+"失敗することがあります"
+
+#: src/bin/linux-image-writer/text.rs:308
+#, rust-format
+msgid "{wanted} is not available for this image, so it was changed to {used}"
+msgstr "このイメージでは{wanted}を利用できないため、{used}に変更しました"
+
+#: src/bin/linux-image-writer/text.rs:321
+#, rust-format
+msgid "Not enough capacity: {size} more is needed"
+msgstr "容量が {size} 不足しています"
+
+#: src/bin/linux-image-writer/text.rs:328
+msgid "Choose an image to write"
+msgstr "書き込むイメージを選択してください"
+
+#: src/bin/linux-image-writer/text.rs:329
+#: src/bin/linux-image-writer/text.rs:395
+#: src/bin/linux-image-writer/window.rs:675
+msgid "Checking the image…"
+msgstr "イメージを確認しています…"
+
+#: src/bin/linux-image-writer/text.rs:330
+#: src/bin/linux-image-writer/window.rs:745
+#: src/bin/linux-image-writer/window.rs:1333
+msgid "This image cannot be written"
+msgstr "このイメージは書き込めません"
+
+#: src/bin/linux-image-writer/text.rs:332
+msgid "The device list could not be read, so the target cannot be checked"
+msgstr "デバイスの一覧を取得できないため、書き込み先を確認できません"
+
+#: src/bin/linux-image-writer/text.rs:334
+#: src/bin/linux-image-writer/window.rs:1024
+msgid "Choose the USB drive to write to"
+msgstr "書き込み先の USB ドライブを選択してください"
+
+#: src/bin/linux-image-writer/text.rs:335
+msgid "This verification mode is not available"
+msgstr "この検証方法は利用できません"
+
+#: src/bin/linux-image-writer/text.rs:344
+msgid "Prepare"
+msgstr "準備"
+
+#: src/bin/linux-image-writer/text.rs:345
+msgid "Write"
+msgstr "書き込み"
+
+#: src/bin/linux-image-writer/text.rs:346
+msgid "Verify"
+msgstr "検証"
+
+#: src/bin/linux-image-writer/text.rs:352
+msgid "Waiting"
+msgstr "待機中"
+
+#: src/bin/linux-image-writer/text.rs:353
+#: src/bin/linux-image-writer/window.rs:2255
+msgid "Running"
+msgstr "実行中"
+
+#: src/bin/linux-image-writer/text.rs:354
+#: src/bin/linux-image-writer/text.rs:468
+#: src/bin/linux-image-writer/text.rs:568
+msgid "Done"
+msgstr "完了"
+
+#: src/bin/linux-image-writer/text.rs:356
+#: src/bin/linux-image-writer/text.rs:472
+#: src/bin/linux-image-writer/window.rs:955
+msgid "None"
+msgstr "なし"
+
+#: src/bin/linux-image-writer/text.rs:357
+#: src/bin/linux-image-writer/text.rs:473
+msgid "Cancelled"
+msgstr "中止"
+
+#: src/bin/linux-image-writer/text.rs:358
+#: src/bin/linux-image-writer/text.rs:485
+msgid "Failed"
+msgstr "失敗"
+
+#: src/bin/linux-image-writer/text.rs:378
+msgid "Preparing to Write"
+msgstr "書き込みを準備しています"
+
+#: src/bin/linux-image-writer/text.rs:379
+msgid "Writing to USB"
+msgstr "USB に書き込んでいます"
+
+#: src/bin/linux-image-writer/text.rs:380
+msgid "Checking the Written Data"
+msgstr "書き込んだデータを確認しています"
+
+#: src/bin/linux-image-writer/text.rs:387
+msgid "Cancelling…"
+msgstr "中止しています…"
+
+#: src/bin/linux-image-writer/text.rs:387
+msgid "Please wait until it stops."
+msgstr "処理が止まるまでお待ちください。"
+
+#: src/bin/linux-image-writer/text.rs:389
+msgid "Nothing has been written to the USB drive yet."
+msgstr "まだ USB ドライブには書き込んでいません。"
+
+#: src/bin/linux-image-writer/text.rs:390
+msgid "Do not remove the USB drive."
+msgstr "USB ドライブを取り外さないでください。"
+
+#: src/bin/linux-image-writer/text.rs:392
+msgid "If the system asks you to authenticate, complete the authentication."
+msgstr "システムの認証画面が表示された場合は、認証を完了してください。"
+
+#: src/bin/linux-image-writer/text.rs:394
+#: src/bin/linux-image-writer/window.rs:2084
+msgid "Checking the target…"
+msgstr "書き込み先を確認しています…"
+
+#: src/bin/linux-image-writer/text.rs:396
+msgid "Checking the compressed image…"
+msgstr "圧縮イメージを確認しています…"
+
+#: src/bin/linux-image-writer/text.rs:397
+msgid "Waiting for the final confirmation…"
+msgstr "最終確認を待っています…"
+
+#: src/bin/linux-image-writer/text.rs:398
+msgid "Starting to write…"
+msgstr "書き込みを開始しています…"
+
+#: src/bin/linux-image-writer/text.rs:400
+msgid "Opening the USB drive…"
+msgstr "USB ドライブを開いています…"
+
+#: src/bin/linux-image-writer/text.rs:403
+msgid "Opening the USB drive for verification…"
+msgstr "検証のために USB ドライブを開いています…"
+
+#: src/bin/linux-image-writer/text.rs:406
+msgid "Decompressing and writing"
+msgstr "展開しながら書き込み中"
+
+#: src/bin/linux-image-writer/text.rs:408
+msgid "Writing"
+msgstr "書き込み中"
+
+#: src/bin/linux-image-writer/text.rs:410
+msgid "Finishing the write…"
+msgstr "書き込みを仕上げています…"
+
+#: src/bin/linux-image-writer/text.rs:411
+msgid "Completing the write to the USB drive. Do not remove it."
+msgstr "USB ドライブへの書き込みを完了しています。取り外さないでください。"
+
+#: src/bin/linux-image-writer/text.rs:413
+msgid "Preparing verification…"
+msgstr "検証の準備をしています…"
+
+#: src/bin/linux-image-writer/text.rs:416
+msgid "Full verification in progress"
+msgstr "完全検証中"
+
+#: src/bin/linux-image-writer/text.rs:417
+msgid "Checking all of the written data."
+msgstr "書き込んだデータをすべて確認しています。"
+
+#: src/bin/linux-image-writer/text.rs:420
+msgid "Quick verification in progress"
+msgstr "クイック検証中"
+
+#: src/bin/linux-image-writer/text.rs:421
+msgid "Checking the written data."
+msgstr "書き込んだデータを確認しています。"
+
+#: src/bin/linux-image-writer/text.rs:432
+msgid "Complete"
+msgstr "完了しました"
+
+#: src/bin/linux-image-writer/text.rs:433
+msgid "Writing Complete"
+msgstr "書き込みが完了しました"
+
+#: src/bin/linux-image-writer/text.rs:434
+msgid "Writing Is Complete"
+msgstr "書き込みは完了しています"
+
+#: src/bin/linux-image-writer/text.rs:435
+msgid "Verification Found a Problem"
+msgstr "検証で問題が見つかりました"
+
+#: src/bin/linux-image-writer/text.rs:436
+msgid "Verification Could Not Be Completed"
+msgstr "検証を完了できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:437
+msgid "Writing Could Not Be Completed"
+msgstr "書き込みを完了できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:439
+msgid "Writing Cancelled"
+msgstr "書き込みを中止しました"
+
+#: src/bin/linux-image-writer/text.rs:441
+msgid "Writing Could Not Start"
+msgstr "書き込みを開始できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:442
+msgid "The Write Operation Could Not Be Completed"
+msgstr "書き込み処理を完了できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:465
+msgid "Full verification done"
+msgstr "完全検証完了"
+
+#: src/bin/linux-image-writer/text.rs:467
+msgid "Quick verification done"
+msgstr "クイック検証完了"
+
+#: src/bin/linux-image-writer/text.rs:471
+msgid "Not run"
+msgstr "未実施"
+
+#: src/bin/linux-image-writer/text.rs:475
+msgid "Mismatch"
+msgstr "不一致"
+
+#: src/bin/linux-image-writer/text.rs:478
+#: src/bin/linux-image-writer/text.rs:483
+msgid "Not completed"
+msgstr "完了できず"
+
+#: src/bin/linux-image-writer/text.rs:480
+#: src/bin/linux-image-writer/text.rs:484
+msgid "Could not start"
+msgstr "開始できず"
+
+#: src/bin/linux-image-writer/text.rs:516
+msgid ""
+"The USB drive may contain an incomplete image. Do not use it as a boot drive."
+msgstr ""
+"USB ドライブには不完全なイメージが残っている可能性があります。起動用の USB ド"
+"ライブとして使用しないでください。"
+
+#: src/bin/linux-image-writer/text.rs:518
+msgid "Nothing was written to the USB drive."
+msgstr "USB ドライブには何も書き込んでいません。"
+
+#: src/bin/linux-image-writer/text.rs:520
+msgid "The USB drive is ready to use."
+msgstr "USB ドライブを使用できます。"
+
+#: src/bin/linux-image-writer/text.rs:521
+msgid "The written data was not verified."
+msgstr "書き込み後の検証は行っていません。"
+
+#: src/bin/linux-image-writer/text.rs:522
+msgid "Verification of the written data was not completed."
+msgstr "書き込み後の検証は完了していません。"
+
+#: src/bin/linux-image-writer/text.rs:524
+msgid ""
+"Writing finished, but the data read back did not match the image. It may not "
+"have been written correctly, so using this USB drive as a boot drive is not "
+"recommended."
+msgstr ""
+"書き込みは完了しましたが、読み戻したデータがイメージと一致しませんでした。正"
+"しく書き込まれていない可能性があるため、この USB ドライブを起動用として使用す"
+"ることはおすすめしません。"
+
+#: src/bin/linux-image-writer/text.rs:528
+msgid "Writing is complete, but verification could not be completed."
+msgstr "書き込みは完了していますが、検証を完了できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:550
+msgid "Writing to the USB drive was not started."
+msgstr "USB ドライブへの書き込みは開始されていません。"
+
+#: src/bin/linux-image-writer/text.rs:554
+msgid "The operation ended because of an internal error."
+msgstr "内部エラーで処理が終了しました。"
+
+#: src/bin/linux-image-writer/text.rs:562
+msgid "Safely Remove"
+msgstr "安全に取り外す"
+
+#: src/bin/linux-image-writer/text.rs:563
+msgid "Try Again"
+msgstr "もう一度試す"
+
+#: src/bin/linux-image-writer/text.rs:564
+msgid "Write to Another USB"
+msgstr "別の USB に書き込む"
+
+#: src/bin/linux-image-writer/text.rs:565
+msgid "Write Again"
+msgstr "もう一度書き込む"
+
+#: src/bin/linux-image-writer/text.rs:566
+msgid "Start Over"
+msgstr "やり直す"
+
+#: src/bin/linux-image-writer/text.rs:567
+msgid "Back to Main View"
+msgstr "メイン画面に戻る"
+
+#: src/bin/linux-image-writer/text.rs:596
+msgid "Safely removing the USB drive…"
+msgstr "USB を安全に取り外しています…"
+
+#: src/bin/linux-image-writer/text.rs:597
+msgid "Do not unplug the USB drive yet."
+msgstr "USB ドライブはまだ取り外さないでください。"
+
+#: src/bin/linux-image-writer/text.rs:606
+msgid "The USB drive can be safely removed"
+msgstr "USB を安全に取り外せます"
+
+#: src/bin/linux-image-writer/text.rs:609
+#, rust-format
+msgid "Unplug {name} from the computer."
+msgstr "{name} をパソコンから取り外してください。"
+
+#: src/bin/linux-image-writer/text.rs:612
+msgid "Unplug the USB drive from the computer."
+msgstr "USB ドライブをパソコンから取り外してください。"
+
+#: src/bin/linux-image-writer/text.rs:614
+msgid "Its filesystems were unmounted"
+msgstr "ファイルシステムを終了しました"
+
+#: src/bin/linux-image-writer/text.rs:617
+msgid "USB drive not found"
+msgstr "USB が見つかりません"
+
+#: src/bin/linux-image-writer/text.rs:618
+msgid "Make sure the USB drive is connected."
+msgstr "USB ドライブが接続されていることを確認してください。"
+
+#: src/bin/linux-image-writer/text.rs:621
+msgid "The USB drive has changed"
+msgstr "USB の状態が変わりました"
+
+#: src/bin/linux-image-writer/text.rs:623
+msgid ""
+"It could not be confirmed to be the same device as when writing, so safe "
+"removal was stopped."
+msgstr ""
+"書き込み時と同じデバイスであることを確認できなかったため、安全な取り外しを中"
+"止しました。"
+
+#: src/bin/linux-image-writer/text.rs:627
+msgid "This USB drive cannot be safely removed from this app"
+msgstr "この USB はアプリから安全に取り外せません"
+
+#: src/bin/linux-image-writer/text.rs:628
+msgid "Eject it from a file manager or similar instead."
+msgstr "ファイルマネージャーなどから取り外してください。"
+
+#: src/bin/linux-image-writer/text.rs:631
+msgid "The USB drive could not be removed"
+msgstr "USB を取り外せませんでした"
+
+#: src/bin/linux-image-writer/text.rs:633
+msgid ""
+"The USB drive is being used by another app. Close any files or apps that use "
+"it, then try again."
+msgstr ""
+"USB ドライブがほかのアプリで使用されています。使用中のファイルやアプリを閉じ"
+"て、もう一度お試しください。"
+
+#: src/bin/linux-image-writer/text.rs:637
+msgid "Safe removal could not be performed"
+msgstr "安全な取り外しを実行できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:639
+msgid ""
+"You are not allowed to do this. Eject the USB drive from a file manager or "
+"similar instead."
+msgstr ""
+"この操作を実行する権限がありません。ファイルマネージャーなどから取り外してく"
+"ださい。"
+
+#: src/bin/linux-image-writer/text.rs:643
+msgid "Safe removal could not be completed"
+msgstr "安全な取り外しを完了できませんでした"
+
+#: src/bin/linux-image-writer/text.rs:645
+msgid ""
+"Do not unplug the USB drive yet. Eject it from a file manager or similar "
+"instead."
+msgstr ""
+"USB ドライブはまだ取り外さないでください。ファイルマネージャーなどから取り外"
+"してください。"
+
+#: src/bin/linux-image-writer/text.rs:680
+msgid "The target USB drive was not found."
+msgstr "書き込み先の USB ドライブが見つかりません。"
+
+#: src/bin/linux-image-writer/text.rs:681
+msgid "Information about the target USB drive could not be read."
+msgstr "書き込み先の USB ドライブの情報を取得できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:683
+msgid ""
+"The target USB drive could not be confirmed to be the same one that was "
+"selected."
+msgstr ""
+"書き込み先の USB ドライブを、選択したものと同じだと確認できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:686
+msgid "The target USB drive cannot be chosen as the target at the moment."
+msgstr "書き込み先の USB ドライブは、現在は書き込み先に選べません。"
+
+#: src/bin/linux-image-writer/text.rs:688
+msgid "The image file could not be read."
+msgstr "イメージファイルを読み取れませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:689
+msgid "This image cannot be written."
+msgstr "このイメージは書き込めません。"
+
+#: src/bin/linux-image-writer/text.rs:690
+msgid "Quick verification is not available for this image."
+msgstr "このイメージではクイック検証を利用できません。"
+
+#: src/bin/linux-image-writer/text.rs:691
+msgid "The compressed image is damaged or incomplete."
+msgstr "圧縮イメージが壊れているか、不完全です。"
+
+#: src/bin/linux-image-writer/text.rs:693
+msgid ""
+"The decompressed size is larger than the capacity of the target USB drive."
+msgstr "展開後のサイズが、書き込み先の USB ドライブの容量を超えています。"
+
+#: src/bin/linux-image-writer/text.rs:696
+msgid ""
+"This compressed image needs too many resources to decompress, so it cannot "
+"be written."
+msgstr "この圧縮イメージは、展開に必要な資源が多すぎるため書き込めません。"
+
+#: src/bin/linux-image-writer/text.rs:698
+msgid "The image file changed while it was being checked."
+msgstr "確認中にイメージファイルが変更されました。"
+
+#: src/bin/linux-image-writer/text.rs:700
+msgid ""
+"Writing was not started because it did not match the final confirmation."
+msgstr "最終確認の内容と一致しなかったため、書き込みを開始しませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:703
+msgid ""
+"The check right before writing found a problem with the target USB drive."
+msgstr ""
+"書き込み直前の再確認で、書き込み先の USB ドライブに問題が見つかりました。"
+
+#: src/bin/linux-image-writer/text.rs:705
+msgid "Access to the USB drive was not allowed."
+msgstr "USB ドライブへのアクセスが許可されませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:707
+msgid "Authentication was cancelled, so the USB drive could not be opened."
+msgstr "認証がキャンセルされたため、USB ドライブを開けませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:709
+msgid "The USB drive could not be opened. It may be in use."
+msgstr "USB ドライブを開けませんでした。使用中の可能性があります。"
+
+#: src/bin/linux-image-writer/text.rs:711
+msgid ""
+"Could not communicate with the system's disk management service (UDisks2)."
+msgstr "システムのディスク管理サービス（UDisks2）と通信できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:714
+msgid ""
+"Writing was not started because the opened device could not be confirmed to "
+"be the target."
+msgstr ""
+"開いたデバイスを書き込み先と同じだと確認できなかったため、書き込みを開始しま"
+"せんでした。"
+
+#: src/bin/linux-image-writer/text.rs:716
+msgid "An error occurred while writing to the USB drive."
+msgstr "USB ドライブへの書き込み中にエラーが発生しました。"
+
+#: src/bin/linux-image-writer/text.rs:717
+msgid "The image file changed during writing."
+msgstr "書き込み中にイメージファイルが変更されました。"
+
+#: src/bin/linux-image-writer/text.rs:718
+msgid "The write could not be finished (the data could not be committed)."
+msgstr "書き込みの仕上げ（データの確定）を完了できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:720
+msgid ""
+"The check before verification could not confirm that the USB drive is the "
+"same as the target."
+msgstr ""
+"検証の前の再確認で、USB ドライブを書き込み先と同じだと確認できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:722
+msgid "The USB drive could not be opened for verification."
+msgstr "検証のために USB ドライブを開けませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:724
+msgid ""
+"Direct reading, which verification needs, is not available in this "
+"environment."
+msgstr "この環境では、検証に必要な直接読み取りを利用できませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:726
+msgid "Verification did not start."
+msgstr "検証が開始されませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:728
+msgid ""
+"The written data did not match the image. This USB drive may not have been "
+"written correctly."
+msgstr ""
+"書き込んだデータがイメージと一致しませんでした。この USB ドライブは正しく書き"
+"込まれていない可能性があります。"
+
+#: src/bin/linux-image-writer/text.rs:730
+msgid "An error occurred while reading back."
+msgstr "読み戻し中にエラーが発生しました。"
+
+#: src/bin/linux-image-writer/text.rs:731
+msgid "The length of the data read back did not match."
+msgstr "読み戻したデータの長さが一致しませんでした。"
+
+#: src/bin/linux-image-writer/text.rs:758
+msgid "Size"
+msgstr "サイズ"
+
+#: src/bin/linux-image-writer/text.rs:760
+msgid "Format"
+msgstr "形式"
+
+#: src/bin/linux-image-writer/text.rs:762
+msgid "Compressed file"
+msgstr "圧縮ファイル"
+
+#: src/bin/linux-image-writer/text.rs:764
+#: src/bin/linux-image-writer/window.rs:711
+#: src/bin/linux-image-writer/window.rs:1809
+msgid "Write size"
+msgstr "書き込みサイズ"
+
+#: src/bin/linux-image-writer/text.rs:778
+#, rust-format
+msgid "All data on {name} ({device}) will be erased."
+msgstr "{name}（{device}）のデータはすべて消去されます。"
+
+#: src/bin/linux-image-writer/window.rs:256
+#: src/bin/linux-image-writer/window.rs:1638
+#: src/bin/linux-image-writer/window.rs:1807
+msgid "Image"
+msgstr "イメージ"
+
+#: src/bin/linux-image-writer/window.rs:257
+#: src/bin/linux-image-writer/window.rs:1647
+#: src/bin/linux-image-writer/window.rs:1810
+msgid "Target"
+msgstr "書き込み先"
+
+#: src/bin/linux-image-writer/window.rs:258
+msgid "Write Options"
+msgstr "書き込みオプション"
+
+#: src/bin/linux-image-writer/window.rs:281
+msgid "All data on the target will be erased."
+msgstr "書き込み先のデータはすべて消去されます。"
+
+#: src/bin/linux-image-writer/window.rs:296
+#: src/bin/linux-image-writer/window.rs:1671
+msgid "Write to USB"
+msgstr "USB に書き込む"
+
+#: src/bin/linux-image-writer/window.rs:388
+msgid "Writing in Progress"
+msgstr "書き込み処理の実行中です"
+
+#: src/bin/linux-image-writer/window.rs:389
+msgid ""
+"The window cannot be closed until it has finished. To stop, press “Cancel”."
+msgstr ""
+"処理が終わるまで、ウィンドウは閉じられません。中止する場合は「キャンセル」を"
+"押してください。"
+
+#: src/bin/linux-image-writer/window.rs:395
+msgid "Safely Removing the USB Drive"
+msgstr "USB を安全に取り外しています"
+
+#: src/bin/linux-image-writer/window.rs:396
+msgid ""
+"The window cannot be closed until it has finished. Do not unplug the USB "
+"drive yet."
+msgstr ""
+"完了するまで、ウィンドウは閉じられません。USB ドライブはまだ取り外さないでく"
+"ださい。"
+
+#: src/bin/linux-image-writer/window.rs:563
+msgid "Disk images (ISO / IMG / GZIP / XZ)"
+msgstr "ディスクイメージ（ISO / IMG / GZIP / XZ）"
+
+#: src/bin/linux-image-writer/window.rs:568
+msgid "All files"
+msgstr "すべてのファイル"
+
+#: src/bin/linux-image-writer/window.rs:577
+#: src/bin/linux-image-writer/window.rs:666
+msgid "Choose an Image to Write"
+msgstr "書き込むイメージを選択"
+
+#: src/bin/linux-image-writer/window.rs:629
+msgid "The image could not be checked"
+msgstr "イメージを確認できませんでした"
+
+#: src/bin/linux-image-writer/window.rs:667
+msgid "ISO, IMG, GZIP and XZ are supported"
+msgstr "ISO / IMG / GZIP / XZ に対応しています"
+
+#: src/bin/linux-image-writer/window.rs:669
+msgid "Choose Image"
+msgstr "イメージを選択"
+
+#: src/bin/linux-image-writer/window.rs:677
+#: src/bin/linux-image-writer/window.rs:2207
+msgid "Checking"
+msgstr "確認中"
+
+#: src/bin/linux-image-writer/window.rs:679
+#: src/bin/linux-image-writer/window.rs:750
+msgid "Choose Another Image"
+msgstr "別のイメージを選択"
+
+#: src/bin/linux-image-writer/window.rs:693
+msgid ""
+"It is decompressed while it is written to USB (the write size is checked "
+"during preparation)"
+msgstr "展開しながら USB に書き込みます（書き込みサイズは準備時に確認します）"
+
+#: src/bin/linux-image-writer/window.rs:706
+#: src/bin/linux-image-writer/window.rs:1808
+msgid "Compression"
+msgstr "圧縮 (Compression)"
+
+#: src/bin/linux-image-writer/window.rs:709
+msgid "File size"
+msgstr "ファイルサイズ"
+
+#: src/bin/linux-image-writer/window.rs:714
+msgid "Checked during preparation (Preflight)"
+msgstr "準備時に確認（Preflight）"
+
+#: src/bin/linux-image-writer/window.rs:719
+msgid "No Verify"
+msgstr "Verify なし"
+
+#: src/bin/linux-image-writer/window.rs:721
+msgid "About Verify availability"
+msgstr "Verify の可否について"
+
+#: src/bin/linux-image-writer/window.rs:724
+msgid "Architecture / boot method"
+msgstr "アーキテクチャ / ブート方式"
+
+#: src/bin/linux-image-writer/window.rs:730
+msgid "Can be written"
+msgstr "書き込みできます"
+
+#: src/bin/linux-image-writer/window.rs:734
+msgid "Change"
+msgstr "変更"
+
+#: src/bin/linux-image-writer/window.rs:735
+msgid "Open to show technical details"
+msgstr "開くと技術情報を表示します"
+
+#: src/bin/linux-image-writer/window.rs:746
+#: src/bin/linux-image-writer/window.rs:988
+msgid "Error"
+msgstr "エラー"
+
+#: src/bin/linux-image-writer/window.rs:929
+msgid "Yes"
+msgstr "はい"
+
+#: src/bin/linux-image-writer/window.rs:929
+msgid "No"
+msgstr "いいえ"
+
+#: src/bin/linux-image-writer/window.rs:938
+#: src/bin/linux-image-writer/window.rs:1811
+msgid "Device"
+msgstr "デバイス"
+
+#: src/bin/linux-image-writer/window.rs:939
+msgid "Vendor"
+msgstr "ベンダー"
+
+#: src/bin/linux-image-writer/window.rs:940
+msgid "Model"
+msgstr "モデル"
+
+#: src/bin/linux-image-writer/window.rs:941
+msgid "Capacity"
+msgstr "容量"
+
+#: src/bin/linux-image-writer/window.rs:942
+msgid "Connection"
+msgstr "接続"
+
+#: src/bin/linux-image-writer/window.rs:943
+msgid "Removable"
+msgstr "リムーバブル"
+
+#: src/bin/linux-image-writer/window.rs:944
+msgid "Writable"
+msgstr "書き込み可能"
+
+#: src/bin/linux-image-writer/window.rs:953
+msgid "Mounts"
+msgstr "マウント"
+
+#: src/bin/linux-image-writer/window.rs:965
+#: src/bin/linux-image-writer/window.rs:2240
+msgid "Unknown"
+msgstr "不明"
+
+#: src/bin/linux-image-writer/window.rs:984
+msgid "Retrying automatically in a moment"
+msgstr "しばらくすると自動的に再試行します"
+
+#: src/bin/linux-image-writer/window.rs:987
+#: src/bin/linux-image-writer/window.rs:1954
+msgid "Technical details"
+msgstr "技術情報"
+
+#: src/bin/linux-image-writer/window.rs:1001
+msgid "Looking for USB drives…"
+msgstr "USB ドライブを探しています…"
+
+#: src/bin/linux-image-writer/window.rs:1003
+msgid "Searching"
+msgstr "検索中"
+
+#: src/bin/linux-image-writer/window.rs:1012
+msgid "No USB drive is large enough for this image"
+msgstr "このイメージを書き込める USB ドライブがありません"
+
+#: src/bin/linux-image-writer/window.rs:1013
+msgid "Connect a USB drive with more capacity"
+msgstr "容量の大きい USB ドライブを接続してください"
+
+#: src/bin/linux-image-writer/window.rs:1021
+msgid "The target is checked once an image is chosen"
+msgstr "イメージを選択した後に書き込み先を確認します"
+
+#: src/bin/linux-image-writer/window.rs:1053
+msgid "Selected automatically"
+msgstr "自動的に選択しました"
+
+#: src/bin/linux-image-writer/window.rs:1055
+msgid "Selected"
+msgstr "選択中"
+
+#: src/bin/linux-image-writer/window.rs:1056
+msgid "Detected"
+msgstr "検出済み"
+
+#: src/bin/linux-image-writer/window.rs:1065
+msgid "Open to show device details"
+msgstr "開くとデバイスの詳細を表示します"
+
+#: src/bin/linux-image-writer/window.rs:1085
+msgid "Too small"
+msgstr "容量不足"
+
+#: src/bin/linux-image-writer/window.rs:1111
+#, rust-format
+msgid "Protected devices ({count})"
+msgstr "保護されているデバイス（{count}）"
+
+#: src/bin/linux-image-writer/window.rs:1115
+msgid "Protected"
+msgstr "保護"
+
+#: src/bin/linux-image-writer/window.rs:1117
+msgid "Cannot be chosen as the target, for safety"
+msgstr "安全のため、書き込み先には選べません"
+
+#: src/bin/linux-image-writer/window.rs:1156
+#: src/bin/linux-image-writer/window.rs:1650
+#: src/bin/linux-image-writer/window.rs:1815
+msgid "Verification"
+msgstr "検証"
+
+#: src/bin/linux-image-writer/window.rs:1163
+msgid "Choose an image to set the verification mode"
+msgstr "イメージを選択すると検証方法を設定できます"
+
+#: src/bin/linux-image-writer/window.rs:1183
+msgid "Recommended"
+msgstr "おすすめ"
+
+#: src/bin/linux-image-writer/window.rs:1188
+#, rust-format
+msgid "{mode} (recommended)"
+msgstr "{mode}（おすすめ）"
+
+#: src/bin/linux-image-writer/window.rs:1195
+#, rust-format
+msgid "{label}. {reason}"
+msgstr "{label}。{reason}"
+
+#: src/bin/linux-image-writer/window.rs:1334
+msgid ""
+"The file or folder name contains characters that cannot be handled. Rename "
+"it, then choose it again."
+msgstr ""
+"ファイル名またはフォルダー名に、扱えない文字が含まれています。名前を変更して"
+"から選び直してください。"
+
+#: src/bin/linux-image-writer/window.rs:1348
+msgid "The Write Operation Could Not Be Started"
+msgstr "書き込み処理を開始できませんでした"
+
+#: src/bin/linux-image-writer/window.rs:1350
+#, rust-format
+msgid ""
+"Nothing was written to the USB drive.\n"
+"({error})"
+msgstr ""
+"USB ドライブには何も書き込んでいません。\n"
+"（{error}）"
+
+#: src/bin/linux-image-writer/window.rs:1466
+msgid "Writing cancelled. Nothing was written to the USB drive."
+msgstr "書き込みを中止しました。USB ドライブには何も書き込んでいません。"
+
+#: src/bin/linux-image-writer/window.rs:1645
+#: src/bin/linux-image-writer/window.rs:1851
+msgid "To the target"
+msgstr "書き込み先へ"
+
+#: src/bin/linux-image-writer/window.rs:1668
+msgid "Start Writing to USB?"
+msgstr "USB への書き込みを開始しますか？"
+
+#: src/bin/linux-image-writer/window.rs:1670
+#: src/bin/linux-image-writer/window.rs:2001
+msgid "Cancel"
+msgstr "キャンセル"
+
+#: src/bin/linux-image-writer/window.rs:1753
+msgid "Stop Writing?"
+msgstr "書き込みを中止しますか？"
+
+#: src/bin/linux-image-writer/window.rs:1754
+msgid "If you stop, the USB drive may be left with an incomplete image."
+msgstr "中止すると、USB ドライブには不完全なイメージが残る可能性があります。"
+
+#: src/bin/linux-image-writer/window.rs:1756
+msgid "Continue Writing"
+msgstr "書き込みを続ける"
+
+#: src/bin/linux-image-writer/window.rs:1757
+msgid "Stop"
+msgstr "中止する"
+
+#: src/bin/linux-image-writer/window.rs:1795
+msgid "Close"
+msgstr "閉じる"
+
+#: src/bin/linux-image-writer/window.rs:1812
+msgid "UDisks2 object"
+msgstr "UDisks2 オブジェクト"
+
+#: src/bin/linux-image-writer/window.rs:1816
+msgid "Current stage"
+msgstr "現在の段階"
+
+#: src/bin/linux-image-writer/window.rs:1817
+msgid "Written"
+msgstr "書き込み済み"
+
+#: src/bin/linux-image-writer/window.rs:1818
+msgid "Verified"
+msgstr "検証済み"
+
+#: src/bin/linux-image-writer/window.rs:1819
+msgid "Outcome"
+msgstr "結果 (Outcome)"
+
+#: src/bin/linux-image-writer/window.rs:1837
+#: src/bin/linux-image-writer/window.rs:1935
+msgid "Processing"
+msgstr "処理中"
+
+#: src/bin/linux-image-writer/window.rs:2236
+msgid "Not available"
+msgstr "未取得"
