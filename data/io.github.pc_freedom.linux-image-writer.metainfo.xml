@@ -54,4 +54,23 @@
   <branding>
     <color type="primary">#FFCC00</color>
   </branding>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-01">
+      <description>
+        <p>First release of Linux Image Writer, a GTK 4 and libadwaita app for writing disk images to USB drives on Linux.</p>
+        <p xml:lang="ja">Linux Image Writer の最初のリリースです。Linux でディスクイメージを USB ドライブに書き込む、GTK 4 と libadwaita のアプリです。</p>
+        <ul>
+          <li>Writes ISO and IMG images, as well as gzip and xz compressed images</li>
+          <li xml:lang="ja">ISO と IMG のイメージに加えて、gzip と xz で圧縮されたイメージも書き込めます</li>
+          <li>Optional quick or full verification of the written data</li>
+          <li xml:lang="ja">書き込んだデータを、クイック検証または完全検証で確認できます</li>
+          <li>Designed for safety: only suitable USB drives can be chosen, and the drive is checked again right before writing</li>
+          <li xml:lang="ja">安全性を重視した設計です。選べるのは書き込みに適した USB ドライブだけで、書き込みの直前にドライブをもう一度確認します</li>
+          <li>Safe removal of the USB drive when writing is finished</li>
+          <li xml:lang="ja">書き込みが終わったら、USB ドライブを安全に取り外せます</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
 </component>
