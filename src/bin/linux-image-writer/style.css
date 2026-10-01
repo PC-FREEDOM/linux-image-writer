@@ -1,0 +1,187 @@
+/* Linux Image Writer -- visual polish.
+ *
+ * Built on libadwaita's own variables, so light, dark and high contrast
+ * keep working: only the accent, a slightly cooler (slate) neutral palette
+ * and a few app-specific classes (all prefixed `liw-`) are set here. Every
+ * state shown in colour is also shown in words and icons by the code. */
+
+/* PC-FREEDOM yellow as the accent: the primary action, the selected
+ * choice, focus rings, progress and the active step. Text on it is dark;
+ * libadwaita derives the readable standalone `--accent-color` from it
+ * (darker amber in light mode, yellow in dark mode). */
+:root {
+  --accent-bg-color: #ffcc00;
+  --accent-fg-color: rgb(0 0 6 / 87%);
+  --liw-line: color-mix(in srgb, currentColor 14%, transparent);
+  --liw-radius: 8px;
+}
+
+/* A cooler, charcoal/slate neutral palette, as light as libadwaita's own
+ * (text contrast is unchanged; high contrast adds its own borders on top).
+ * The dark palette is style-dark.css, applied while the style is dark. */
+:root {
+  --window-bg-color: #f3f4f6;
+  --headerbar-bg-color: #e9ecef;
+  --view-bg-color: #ffffff;
+}
+
+/* ---- Lists: less rounded, no drop shadow, a thin outline ---- */
+
+.liw-sections list.boxed-list,
+.liw-op list.boxed-list {
+  border-radius: var(--liw-radius);
+  box-shadow: 0 0 0 1px var(--liw-line);
+}
+
+.liw-sections list.boxed-list > row:first-child,
+.liw-sections list.boxed-list > row:first-child.expander row.header,
+.liw-op list.boxed-list > row:first-child,
+.liw-op list.boxed-list > row:first-child.expander row.header {
+  border-top-left-radius: var(--liw-radius);
+  border-top-right-radius: var(--liw-radius);
+}
+
+.liw-sections list.boxed-list > row:last-child,
+.liw-sections list.boxed-list > row:last-child.expander:not(:checked),
+.liw-sections list.boxed-list > row:last-child.expander:not(:checked) row.header,
+.liw-sections list.boxed-list > row:last-child.expander:checked list.nested,
+.liw-op list.boxed-list > row:last-child,
+.liw-op list.boxed-list > row:last-child.expander:not(:checked),
+.liw-op list.boxed-list > row:last-child.expander:not(:checked) row.header,
+.liw-op list.boxed-list > row:last-child.expander:checked list.nested {
+  border-bottom-left-radius: var(--liw-radius);
+  border-bottom-right-radius: var(--liw-radius);
+}
+
+/* ---- Section titles: a quieter, instrument-like label ---- */
+
+.liw-sections preferencesgroup > box > box.header {
+  border-bottom: 1px solid var(--liw-line);
+  padding-bottom: 4px;
+}
+
+.liw-sections preferencesgroup > box > box.header label.heading {
+  font-size: 0.92em;
+  letter-spacing: 0.04em;
+}
+
+/* The Verify choices sit in the same kind of outlined panel as the lists. */
+.liw-options-panel {
+  padding: 10px 12px;
+  border-radius: var(--liw-radius);
+  background-color: var(--card-bg-color);
+  box-shadow: 0 0 0 1px var(--liw-line);
+}
+
+/* ---- The always-shown warning: a quiet panel, not an alarm ---- */
+
+.liw-warning {
+  padding: 7px 14px;
+  border-radius: var(--liw-radius);
+  background-color: color-mix(in srgb, var(--warning-bg-color) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning-color) 40%, transparent);
+}
+
+.liw-warning > image {
+  color: var(--warning-color);
+}
+
+/* ---- Buttons: moderate corners instead of pills ---- */
+
+button.liw-primary {
+  min-height: 24px;
+  padding: 10px 28px;
+  border-radius: var(--liw-radius);
+}
+
+button.liw-action {
+  padding: 8px 18px;
+  border-radius: var(--liw-radius);
+}
+
+/* Not yet possible is neutral grey, never a faded yellow or an error. */
+button.liw-primary.suggested-action:disabled {
+  background-color: color-mix(in srgb, currentColor 10%, transparent);
+  color: inherit;
+}
+
+/* ---- The steps: a simple status indicator per step ---- */
+
+.liw-phase {
+  padding: 6px 12px 7px;
+  border-radius: 6px;
+  box-shadow: inset 0 -2px 0 transparent;
+}
+
+.liw-phase.liw-phase-active {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 12%, transparent);
+  box-shadow: inset 0 -2px 0 var(--accent-color);
+}
+
+.liw-phase.liw-phase-active > box > image {
+  color: var(--accent-color);
+}
+
+.liw-phase.liw-phase-done {
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--success-color) 55%, transparent);
+}
+
+.liw-phase.liw-phase-done > box > image {
+  color: var(--success-color);
+}
+
+.liw-phase.liw-phase-failed {
+  box-shadow: inset 0 -2px 0 var(--error-color);
+}
+
+.liw-phase.liw-phase-failed > box > image,
+.liw-phase.liw-phase-failed > label {
+  color: var(--error-color);
+}
+
+.liw-phase.liw-phase-cancelled {
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--warning-color) 60%, transparent);
+}
+
+.liw-phase.liw-phase-cancelled > box > image {
+  color: var(--warning-color);
+}
+
+/* Still to come, not requested or not run: low emphasis. */
+.liw-phase.liw-phase-idle > box {
+  opacity: var(--dim-opacity);
+}
+
+/* ---- Progress: slimmer, in the accent ---- */
+
+progressbar.liw-progress > trough {
+  min-height: 6px;
+  border-radius: 3px;
+}
+
+progressbar.liw-progress > trough > progress {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: var(--accent-color);
+}
+
+progressbar.liw-progress > text {
+  opacity: 0.85;
+  font-weight: bold;
+}
+
+/* ---- Result: icon, title, message ---- */
+
+.liw-result-icon {
+  margin-bottom: 2px;
+}
+
+.liw-result-message {
+  margin-top: 2px;
+}
+
+/* Safe Removal: the one status that says the drive can be removed. */
+row.liw-removed label.title {
+  color: var(--success-color);
+  font-weight: bold;
+}

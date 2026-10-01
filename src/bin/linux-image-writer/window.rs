@@ -27,8 +27,10 @@ use crate::model::{
     self, CandidateLike, Eligibility, ImagePhase, SelectionOrigin, TargetChoice, TargetReturn,
     VerifyState,
 };
-use crate::operation::{self, CancelAction, Ending, STEPS, Tracker};
-use crate::result::{self, Leaving, RemovalPresentation, RemovalStatus, ResultAction};
+use crate::operation::{self, CancelAction, Ending, Mark, STEPS, Tracker};
+use crate::result::{
+    self, Leaving, RemovalNotice, RemovalPresentation, RemovalStatus, ResultAction, ResultKind,
+};
 use crate::text;
 
 // How often the device list is read again (and whenever the window becomes
@@ -238,6 +240,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let image_box = section_box();
     let target_box = section_box();
     let verify_box = section_box();
+    // The Verify choices in the same outlined panel as the lists.
+    verify_box.add_css_class("liw-options-panel");
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -246,6 +250,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .margin_bottom(12)
         .margin_start(12)
         .margin_end(12)
+        .css_classes(["liw-sections"])
         .build();
     content.append(&group("イメージ", &image_box));
     content.append(&group("書き込み先", &target_box));
@@ -267,6 +272,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .halign(gtk::Align::Center)
+        .css_classes(["liw-warning"])
         .build();
     warning.append(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
     warning.append(
@@ -289,7 +295,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .label("USB に書き込む")
         .halign(gtk::Align::Center)
         .sensitive(false)
-        .css_classes(["pill", "suggested-action"])
+        .css_classes(["liw-primary", "suggested-action"])
         .build();
     let bottom = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -304,7 +310,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     bottom.append(&write_button);
 
     let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.add_top_bar(&header_bar());
     toolbar.set_content(Some(&scroller));
     toolbar.add_bottom_bar(&bottom);
     toolbar.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
@@ -413,6 +419,16 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     render_all(&ui);
     refresh_targets(&ui);
     ui
+}
+
+// The product name, and the brand under it, small.
+fn header_bar() -> adw::HeaderBar {
+    adw::HeaderBar::builder()
+        .title_widget(&adw::WindowTitle::new(
+            "Linux Image Writer",
+            "by PC-FREEDOM",
+        ))
+        .build()
 }
 
 fn section_box() -> gtk::Box {
@@ -1793,7 +1809,11 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             .css_classes(classes.to_vec())
             .build()
     };
-    let icon = gtk::Image::builder().pixel_size(48).visible(false).build();
+    let icon = gtk::Image::builder()
+        .pixel_size(48)
+        .visible(false)
+        .css_classes(["liw-result-icon"])
+        .build();
     let title = centered(&["title-2"]);
     let spinner = gtk::Spinner::builder().spinning(true).build();
     spinner.update_property(&[gtk::accessible::Property::Label("処理中")]);
@@ -1866,6 +1886,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
                 .orientation(gtk::Orientation::Vertical)
                 .spacing(2)
                 .accessible_role(gtk::AccessibleRole::Group)
+                .css_classes(["liw-phase"])
                 .build();
             item.append(&heading);
             item.append(&state);
@@ -1880,9 +1901,12 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         })
         .collect();
 
-    let progress = gtk::ProgressBar::builder().show_text(true).build();
+    let progress = gtk::ProgressBar::builder()
+        .show_text(true)
+        .css_classes(["liw-progress"])
+        .build();
     let amount = centered(&["dim-label", "numeric"]);
-    let message = centered(&[]);
+    let message = centered(&["liw-result-message"]);
 
     let removal = {
         let list = list();
@@ -1927,6 +1951,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .margin_bottom(12)
         .margin_start(12)
         .margin_end(12)
+        .css_classes(["liw-op"])
         .build();
     for widget in [
         icon.upcast_ref::<gtk::Widget>(),
@@ -1957,7 +1982,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     let cancel = gtk::Button::builder()
         .label("キャンセル")
         .halign(gtk::Align::Center)
-        .css_classes(["pill"])
+        .css_classes(["liw-action"])
         .build();
     let bottom = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1990,7 +2015,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         let button = gtk::Button::builder()
             .label(text::result_action(action))
             .halign(gtk::Align::Center)
-            .css_classes(["pill"])
+            .css_classes(["liw-action"])
             .visible(false)
             .build();
         action_row.append(&button);
@@ -1999,7 +2024,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     .collect();
 
     let page = adw::ToolbarView::new();
-    page.add_top_bar(&adw::HeaderBar::new());
+    page.add_top_bar(&header_bar());
     page.set_content(Some(&scroller));
     page.add_bottom_bar(&bottom);
     page.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
@@ -2050,20 +2075,26 @@ fn render_operation(ui: &Ui) {
 
     // The same row of steps while running and on the result: where each
     // step is now, or how it ended.
-    let steps: [(&str, &str); 3] = match &view {
-        None => tracker
-            .marks()
-            .map(|mark| (text::mark_label(mark), text::mark_icon(mark))),
+    let steps: [(&str, &str, &str); 3] = match &view {
+        None => tracker.marks().map(|mark| {
+            (
+                text::mark_label(mark),
+                text::mark_icon(mark),
+                phase_style(mark, false),
+            )
+        }),
         Some(view) => view.steps.map(|line| {
             (
                 text::result_step(view.case, line),
                 text::result_mark_icon(line.mark),
+                phase_style(line.mark, true),
             )
         }),
     };
-    for (phase, (state, icon)) in op.phase_items.iter().zip(steps) {
+    for (phase, (state, icon, style)) in op.phase_items.iter().zip(steps) {
         phase.icon.set_icon_name(Some(icon));
         phase.state.set_text(state);
+        set_style(&phase.item, &PHASE_STYLES, Some(style));
         phase
             .item
             .update_property(&[gtk::accessible::Property::Label(&format!(
@@ -2113,6 +2144,7 @@ fn render_operation(ui: &Ui) {
         }
         Some(view) => {
             op.icon.set_icon_name(Some(text::result_icon(view.kind)));
+            set_style(&op.icon, &SEMANTIC_STYLES, result_style(view.kind));
             op.icon.set_visible(true);
             op.title.set_text(text::result_title(view.case));
             op.status.set_visible(false);
@@ -2223,6 +2255,16 @@ fn render_removal(
     let words = text::removal(notice, target_name);
     ui.status.set_title(words.title);
     ui.status.set_subtitle(&words.message);
+    let removed = matches!(
+        notice,
+        RemovalNotice::Finished(RemovalStatus::Removed { .. })
+    );
+    set_style(
+        &ui.status,
+        &["liw-removed"],
+        removed.then_some("liw-removed"),
+    );
+    set_style(&ui.icon, &SEMANTIC_STYLES, removal_style(notice));
     match text::removal_icon(notice) {
         Some(icon) => {
             ui.icon.set_icon_name(Some(icon));
@@ -2242,4 +2284,67 @@ fn render_removal(
         None => ui.extra.set_visible(false),
     }
     ui.list.set_visible(true);
+}
+
+// ---- Style classes (style.css) ----
+//
+// Colour only repeats what the words and icons already say.
+
+const PHASE_STYLES: [&str; 5] = [
+    "liw-phase-active",
+    "liw-phase-done",
+    "liw-phase-failed",
+    "liw-phase-cancelled",
+    "liw-phase-idle",
+];
+
+const SEMANTIC_STYLES: [&str; 3] = ["success", "warning", "error"];
+
+// How a step looks: the current one, how it ended, or low emphasis (still to
+// come, not requested, or -- once the operation `ended` -- not run).
+fn phase_style(mark: Mark, ended: bool) -> &'static str {
+    match mark {
+        Mark::Active if !ended => "liw-phase-active",
+        Mark::Done => "liw-phase-done",
+        Mark::Failed => "liw-phase-failed",
+        Mark::Cancelled => "liw-phase-cancelled",
+        Mark::Waiting | Mark::Active | Mark::Skipped => "liw-phase-idle",
+    }
+}
+
+// The result icon's colour: written but not verified stays neutral.
+fn result_style(kind: ResultKind) -> Option<&'static str> {
+    match kind {
+        ResultKind::Success => Some("success"),
+        ResultKind::WrittenNotVerified => None,
+        ResultKind::Cancelled => Some("warning"),
+        ResultKind::Failed => Some("error"),
+    }
+}
+
+// The Safe Removal icon's colour, alongside `text::removal_icon`.
+fn removal_style(notice: RemovalNotice) -> Option<&'static str> {
+    match notice {
+        RemovalNotice::Removing => None,
+        RemovalNotice::Finished(status) => match status {
+            RemovalStatus::Removed { .. } => Some("success"),
+            RemovalStatus::DeviceGone | RemovalStatus::Unsupported => None,
+            RemovalStatus::DeviceChanged
+            | RemovalStatus::Busy
+            | RemovalStatus::NotAuthorized
+            | RemovalStatus::NotCompleted => Some("warning"),
+        },
+    }
+}
+
+// Leaves exactly `class` (if any) of `classes` on `widget`.
+fn set_style(widget: &impl IsA<gtk::Widget>, classes: &[&str], class: Option<&str>) {
+    for other in classes {
+        if Some(*other) != class {
+            widget.remove_css_class(other);
+        }
+    }
+    if let Some(class) = class {
+        widget.add_css_class(class);
+    }
 }

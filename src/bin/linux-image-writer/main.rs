@@ -42,9 +42,44 @@ fn main() -> glib::ExitCode {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
+    app.connect_startup(|_| load_style());
     app.connect_activate(|app| window::present(app, None));
     app.connect_open(|app, files, _| {
         window::present(app, files.first().and_then(|file| file.path()));
     });
     app.run()
+}
+
+// The app's own look (style.css), over libadwaita's, and its dark palette
+// (style-dark.css) while the style is dark. Both are compiled in. Presentation
+// only: no widget depends on them to work or to be understood.
+fn load_style() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = |css: &str| {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(css);
+        provider
+    };
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider(include_str!("style.css")),
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    let dark = provider(include_str!("style-dark.css"));
+    let apply = move |manager: &adw::StyleManager| {
+        if manager.is_dark() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &dark,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        } else {
+            gtk::style_context_remove_provider_for_display(&display, &dark);
+        }
+    };
+    let manager = adw::StyleManager::default();
+    apply(&manager);
+    manager.connect_dark_notify(apply);
 }

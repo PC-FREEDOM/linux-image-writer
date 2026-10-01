@@ -1,0 +1,10 @@
+/* Linux Image Writer -- the dark charcoal/slate palette, applied on top of
+ * style.css while libadwaita's style is dark (see main.rs). */
+
+:root {
+  --window-bg-color: #1e2125;
+  --headerbar-bg-color: #262a2f;
+  --view-bg-color: #191c1f;
+  --dialog-bg-color: #2c3136;
+  --popover-bg-color: #2c3136;
+}
