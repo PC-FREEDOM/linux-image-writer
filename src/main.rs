@@ -11,9 +11,9 @@ mod safety;
 mod writer;
 
 use execution::{core, linux_access, write_job};
-use identity::{compare_identity, compare_instance, IdentityComparison, InstanceComparison};
+use identity::{IdentityComparison, InstanceComparison, compare_identity, compare_instance};
 use linux_backend::{collect_device_snapshot, collect_device_snapshots};
-use linux_monitor::{start_monitoring, DeviceEvent};
+use linux_monitor::{DeviceEvent, start_monitoring};
 use orchestration::image::CompressedImageRejection;
 use safety::assess_device;
 use std::io::Write as _;
@@ -48,8 +48,7 @@ fn main() -> zbus::Result<()> {
             return run_prepare_test(target);
         }
         Some("write-test") => {
-            const USAGE: &str =
-                "usage: cargo run -- write-test <image-path> <udisks2-block-object-path> [verify-mode] [--test-pause-before-verify]\n\
+            const USAGE: &str = "usage: cargo run -- write-test <image-path> <udisks2-block-object-path> [verify-mode] [--test-pause-before-verify]\n\
                  verify-mode: none (default) | quick | full\n\
                  --test-pause-before-verify: TEST-ONLY diagnostic option (not for normal use).\n\
                  Pauses after write+sync, before Verify fetches a fresh device snapshot, so a\n\
@@ -348,7 +347,10 @@ fn print_selection_state(state: &core::SelectionState) {
         } => {
             println!(
                 "\n[Selection] Invalidated  device={} reason={reason:?} (baseline was risk={:?} writable={}) selection_generation={:?}",
-                baseline.device, baseline_assessment.risk_level, baseline_assessment.writable, selection_generation
+                baseline.device,
+                baseline_assessment.risk_level,
+                baseline_assessment.writable,
+                selection_generation
             );
         }
     }
@@ -526,7 +528,9 @@ fn run_prepare_test(block_path: String) -> zbus::Result<()> {
 
     println!(
         "prepare-test: Write Gate (pre-open) passed. WritePlan: image_size={} target_size={} chunk_size={}",
-        ready.plan().image_size, ready.plan().target_size, ready.plan().chunk_size
+        ready.plan().image_size,
+        ready.plan().target_size,
+        ready.plan().chunk_size
     );
 
     println!(
@@ -608,7 +612,9 @@ fn run_prepare_test(block_path: String) -> zbus::Result<()> {
         }
         Err(error) => {
             println!("prepare-test: Write Gate rejected after OpenDevice: {error:?}");
-            println!("prepare-test: FD (if any was opened) was already closed via RAII inside the Write Gate");
+            println!(
+                "prepare-test: FD (if any was opened) was already closed via RAII inside the Write Gate"
+            );
         }
     }
 

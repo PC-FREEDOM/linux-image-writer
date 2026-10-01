@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::linux_access::{ActiveWriteTarget, FdMetadata, OpenedDeviceHandle, SyncTarget};
 use crate::device::{DeviceSnapshot, SnapshotFetchOutcome};
-use crate::identity::{compare_identity, compare_instance, IdentityComparison, InstanceComparison};
+use crate::identity::{IdentityComparison, InstanceComparison, compare_identity, compare_instance};
 use crate::linux_monitor::DeviceEvent;
-use crate::safety::{assess_device, RiskLevel, SafetyAssessment};
-use crate::writer::{WriteError as WriterError, WritePlan, DEFAULT_CHUNK_SIZE};
+use crate::safety::{RiskLevel, SafetyAssessment, assess_device};
+use crate::writer::{DEFAULT_CHUNK_SIZE, WriteError as WriterError, WritePlan};
 
 #[derive(Debug)]
 pub enum InvalidationReason {

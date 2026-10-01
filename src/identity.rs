@@ -12,12 +12,8 @@ pub enum IdentityComparison {
 // investigation), so they are intentionally excluded from this comparison.
 // Only serial/size/vendor/model act as identity evidence; a positive `Same`
 // requires a matching, non-empty serial on both sides.
-pub fn compare_identity(
-    baseline: &DeviceSnapshot,
-    current: &DeviceSnapshot,
-) -> IdentityComparison {
-    let serial_known =
-        !baseline.serial.is_empty() && !current.serial.is_empty();
+pub fn compare_identity(baseline: &DeviceSnapshot, current: &DeviceSnapshot) -> IdentityComparison {
+    let serial_known = !baseline.serial.is_empty() && !current.serial.is_empty();
 
     if serial_known && baseline.serial != current.serial {
         return IdentityComparison::Changed;
@@ -31,9 +27,8 @@ pub fn compare_identity(
         && !current.vendor.is_empty()
         && baseline.vendor != current.vendor;
 
-    let model_conflicts = !baseline.model.is_empty()
-        && !current.model.is_empty()
-        && baseline.model != current.model;
+    let model_conflicts =
+        !baseline.model.is_empty() && !current.model.is_empty() && baseline.model != current.model;
 
     if vendor_conflicts || model_conflicts {
         return IdentityComparison::Changed;
@@ -61,10 +56,7 @@ pub enum InstanceComparison {
 // compare_identity would still correctly call it the same physical device.
 // Mixing the two would defeat that distinction, so diskseq is intentionally
 // kept out of compare_identity and only used here.
-pub fn compare_instance(
-    baseline: &DeviceSnapshot,
-    current: &DeviceSnapshot,
-) -> InstanceComparison {
+pub fn compare_instance(baseline: &DeviceSnapshot, current: &DeviceSnapshot) -> InstanceComparison {
     match (baseline.diskseq, current.diskseq) {
         (Some(a), Some(b)) if a == b => InstanceComparison::SameInstance,
         (Some(_), Some(_)) => InstanceComparison::Recreated,
@@ -79,11 +71,8 @@ mod tests {
     fn base_device() -> DeviceSnapshot {
         DeviceSnapshot {
             device: "/dev/sda".to_string(),
-            block_path: "/org/freedesktop/UDisks2/block_devices/sda"
-                .to_string(),
-            drive_path:
-                "/org/freedesktop/UDisks2/drives/Test_Model_TEST-SERIAL-0001"
-                    .to_string(),
+            block_path: "/org/freedesktop/UDisks2/block_devices/sda".to_string(),
+            drive_path: "/org/freedesktop/UDisks2/drives/Test_Model_TEST-SERIAL-0001".to_string(),
             major: 8,
             minor: 0,
             diskseq: Some(12),
@@ -125,8 +114,7 @@ mod tests {
         let baseline = base_device();
         let mut current = base_device();
         current.device = "/dev/sdb".to_string();
-        current.block_path =
-            "/org/freedesktop/UDisks2/block_devices/sdb".to_string();
+        current.block_path = "/org/freedesktop/UDisks2/block_devices/sdb".to_string();
 
         assert_eq!(
             compare_identity(&baseline, &current),

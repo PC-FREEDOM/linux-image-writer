@@ -53,9 +53,7 @@ impl DeviceEvent {
     }
 }
 
-fn build_property_changes(
-    changed_properties: HashMap<String, OwnedValue>,
-) -> Vec<PropertyChange> {
+fn build_property_changes(changed_properties: HashMap<String, OwnedValue>) -> Vec<PropertyChange> {
     changed_properties
         .into_iter()
         .map(|(name, value)| {

@@ -132,13 +132,13 @@
 #![allow(dead_code)]
 
 use std::io::{self, Read};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::core::{
-    check_fd_binding, diagnose_identity_instance_for_verify, verify_target_check_from_diagnostics,
     ActiveWrite, AuthorizedWrite, FdBindingCheck, VerifyMode, VerifyTargetCheckError,
-    VerifyTargetDiagnostics,
+    VerifyTargetDiagnostics, check_fd_binding, diagnose_identity_instance_for_verify,
+    verify_target_check_from_diagnostics,
 };
 use super::linux_access::{
     DirectReadGeometry, DirectReadSetupError, DirectReadTarget, FdMetadata, OpenedDeviceHandle,
@@ -1257,7 +1257,7 @@ impl VerifyReadyToOpen {
         match check_fd_binding(&self.current, fd_metadata) {
             FdBindingCheck::Match => {}
             FdBindingCheck::Mismatch => {
-                return Err((self.image, VerifyStartError::FdBindingMismatch))
+                return Err((self.image, VerifyStartError::FdBindingMismatch));
             }
             FdBindingCheck::InsufficientInformation => {
                 return Err((self.image, VerifyStartError::FdBindingInsufficient));
@@ -2183,8 +2183,8 @@ mod tests {
     // target_may_be_modified must still be true -- a "0 bytes written"
     // report must never be read as proof the target is untouched (rule C).
     #[test]
-    fn target_write_error_is_failed_and_conservatively_flagged_as_modified_even_with_zero_bytes_written(
-    ) {
+    fn target_write_error_is_failed_and_conservatively_flagged_as_modified_even_with_zero_bytes_written()
+     {
         let image_size = 64u64;
         let target_size = 128u64;
 
@@ -3537,7 +3537,10 @@ mod tests {
         };
         let expected_total = 3 * QUICK_VERIFY_WINDOW_SIZE;
         assert_eq!(succeeded.verified_bytes, expected_total);
-        assert_ne!(expected_total, image_size, "sanity: sampled total must differ from the full image size for this test to be meaningful");
+        assert_ne!(
+            expected_total, image_size,
+            "sanity: sampled total must differ from the full image size for this test to be meaningful"
+        );
         assert_eq!(progress_log.last().unwrap().total_bytes, expected_total);
         assert_eq!(progress_log.last().unwrap().verified_bytes, expected_total);
     }

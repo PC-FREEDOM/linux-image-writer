@@ -22,11 +22,9 @@ fn bytes_to_string(bytes: &[u8]) -> String {
 // Block.DeviceNumber and for a raw fstat() st_rdev value (linux_access.rs) —
 // both are the same dev_t encoding.
 pub(crate) fn decode_device_number(device_number: u64) -> (u32, u32) {
-    let major = (((device_number >> 8) & 0xfff) as u32)
-        | ((device_number >> 32) as u32 & !0xfff);
+    let major = (((device_number >> 8) & 0xfff) as u32) | ((device_number >> 32) as u32 & !0xfff);
 
-    let minor = ((device_number & 0xff) as u32)
-        | ((device_number >> 12) as u32 & !0xff);
+    let minor = ((device_number & 0xff) as u32) | ((device_number >> 12) as u32 & !0xff);
 
     (major, minor)
 }

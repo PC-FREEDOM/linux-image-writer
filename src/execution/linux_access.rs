@@ -357,11 +357,7 @@ fn read_size_via_ioctl(fd: RawFd) -> Option<u64> {
     // write into. This ioctl is read-only: it cannot mutate the device.
     let result = unsafe { ioctl(fd, BLKGETSIZE64, &mut size) };
 
-    if result == 0 {
-        Some(size)
-    } else {
-        None
-    }
+    if result == 0 { Some(size) } else { None }
 }
 
 // BLKGETDISKSEQ = _IOR(0x12, 128, __u64), from <linux/fs.h> (Linux 5.15+).

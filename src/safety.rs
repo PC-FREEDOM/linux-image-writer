@@ -32,11 +32,10 @@ pub struct SafetyAssessment {
 pub fn assess_device(device: &DeviceSnapshot) -> SafetyAssessment {
     let mut reasons = Vec::new();
 
-    let has_critical_mount = device.mount_points.iter().any(|mount| {
-        mount == "/"
-            || mount == "/boot"
-            || mount == "/boot/efi"
-    });
+    let has_critical_mount = device
+        .mount_points
+        .iter()
+        .any(|mount| mount == "/" || mount == "/boot" || mount == "/boot/efi");
 
     if has_critical_mount {
         reasons.push(RiskReason::CriticalMount);
@@ -166,11 +165,8 @@ mod tests {
     fn base_device() -> DeviceSnapshot {
         DeviceSnapshot {
             device: "/dev/sdx".to_string(),
-            block_path: "/org/freedesktop/UDisks2/block_devices/sdx"
-                .to_string(),
-            drive_path:
-                "/org/freedesktop/UDisks2/drives/Test_Model_TEST-SERIAL-0001"
-                    .to_string(),
+            block_path: "/org/freedesktop/UDisks2/block_devices/sdx".to_string(),
+            drive_path: "/org/freedesktop/UDisks2/drives/Test_Model_TEST-SERIAL-0001".to_string(),
             major: 8,
             minor: 0,
             diskseq: Some(12),
@@ -282,10 +278,7 @@ mod tests {
 
         assert!(matches!(assessment.risk_level, RiskLevel::Blocked));
         assert!(!assessment.writable);
-        assert!(has_reason(
-            &assessment.reasons,
-            &RiskReason::ComplexStorage
-        ));
+        assert!(has_reason(&assessment.reasons, &RiskReason::ComplexStorage));
     }
 
     #[test]
@@ -373,10 +366,7 @@ mod tests {
         assert!(has_reason(&assessment.reasons, &RiskReason::CriticalMount));
         assert!(has_reason(&assessment.reasons, &RiskReason::SystemDevice));
         assert!(has_reason(&assessment.reasons, &RiskReason::ActiveSwap));
-        assert!(has_reason(
-            &assessment.reasons,
-            &RiskReason::ComplexStorage
-        ));
+        assert!(has_reason(&assessment.reasons, &RiskReason::ComplexStorage));
     }
 
     #[test]

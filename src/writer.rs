@@ -274,8 +274,8 @@ mod tests {
     #[test]
     fn small_data_is_written_completely() {
         let data = b"hello world".to_vec();
-        let plan = WritePlan::new(data.len() as u64, data.len() as u64, DEFAULT_CHUNK_SIZE)
-            .unwrap();
+        let plan =
+            WritePlan::new(data.len() as u64, data.len() as u64, DEFAULT_CHUNK_SIZE).unwrap();
         let source = Cursor::new(data.clone());
         let mut target = Vec::new();
 
@@ -331,10 +331,16 @@ mod tests {
         let mut target = Vec::new();
         let mut checks = 0;
 
-        let result = write(&plan, source, &mut target, |_| {}, || {
-            checks += 1;
-            checks > 2
-        });
+        let result = write(
+            &plan,
+            source,
+            &mut target,
+            |_| {},
+            || {
+                checks += 1;
+                checks > 2
+            },
+        );
 
         match result {
             Err(WriteError::Cancelled { bytes_written }) => {
