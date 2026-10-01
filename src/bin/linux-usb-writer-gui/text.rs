@@ -327,7 +327,8 @@ pub fn mark_label(mark: Mark) -> &'static str {
         Mark::Waiting => "待機中",
         Mark::Active => "実行中",
         Mark::Done => "完了",
-        Mark::Skipped => "検証なし",
+        // Under the step's own name ("検証"), as on the result view.
+        Mark::Skipped => "なし",
         Mark::Cancelled => "中止",
         Mark::Failed => "失敗",
     }
@@ -410,43 +411,55 @@ pub fn result_title(case: ResultCase) -> &'static str {
     }
 }
 
+// The same icon as a failed step on the result view.
 pub fn result_icon(kind: ResultKind) -> &'static str {
     match kind {
         ResultKind::Success => "emblem-ok-symbolic",
         ResultKind::WrittenNotVerified => "dialog-information-symbolic",
         ResultKind::Cancelled => "process-stop-symbolic",
-        ResultKind::Failed => "dialog-warning-symbolic",
+        ResultKind::Failed => "dialog-error-symbolic",
     }
 }
 
-// What one step says on the result view: the step's own words where the
-// case says more than its mark.
+// What one step says on the result view, under the step's name in the same
+// row of steps as while the operation ran: a few words for its final state
+// (what it means for the drive is the result message's). The operation has
+// ended, so no step is ever "waiting" or "running" here: a step it never
+// reached was not run ("なし" for a Verify that was not requested).
 pub fn result_step(case: ResultCase, line: StepLine) -> &'static str {
-    match (line.step, line.mark) {
-        (Step::Write, Mark::Done) => "書き込み完了",
-        (Step::Write, _) => match case {
-            ResultCase::WriteFailed { .. } => "書き込みを完了できませんでした",
-            ResultCase::WriteCancelled { .. } => "中止（書き込みは完了していません）",
-            _ => mark_label(line.mark),
+    match line.mark {
+        Mark::Done => match (line.step, case) {
+            (Step::Verify, ResultCase::Verified(VerifyMode::Full)) => "完全検証完了",
+            (Step::Verify, ResultCase::Verified(_)) => "クイック検証完了",
+            _ => "完了",
         },
-        (Step::Verify, _) => match case {
-            ResultCase::Verified(mode) => match mode {
-                VerifyMode::Full => "完全検証完了",
-                _ => "クイック検証完了",
-            },
-            ResultCase::WrittenWithoutVerify => "検証なし",
-            ResultCase::VerifyCancelled => "検証は完了していません",
-            ResultCase::VerifyMismatch => "読み戻したデータが一致しませんでした",
-            ResultCase::VerifyNotCompleted(reason) => {
+        // Never reached (`Active` does not outlast an operation).
+        Mark::Waiting | Mark::Active => "未実施",
+        Mark::Skipped => "なし",
+        Mark::Cancelled => "中止",
+        Mark::Failed => match (line.step, case) {
+            (Step::Verify, ResultCase::VerifyMismatch) => "不一致",
+            (Step::Verify, ResultCase::VerifyNotCompleted(reason)) => {
                 if verify_ran(reason) {
-                    "検証中に問題が発生しました"
+                    "完了できず"
                 } else {
-                    "検証を開始できませんでした"
+                    "開始できず"
                 }
             }
-            _ => mark_label(line.mark),
+            (Step::Write, ResultCase::WriteFailed { .. }) => "完了できず",
+            (Step::Write, ResultCase::NotStarted(_)) => "開始できず",
+            _ => "失敗",
         },
-        (Step::Prepare, _) => mark_label(line.mark),
+    }
+}
+
+// The icon next to a step's final state on the result view: a step that
+// was not run looks like one that was not requested, never like one still
+// to come.
+pub fn result_mark_icon(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Waiting | Mark::Active => mark_icon(Mark::Skipped),
+        other => mark_icon(other),
     }
 }
 
@@ -971,10 +984,7 @@ mod tests {
     fn success_says_what_was_verified() {
         let quick = ResultCase::Verified(VerifyMode::Quick);
         assert_eq!(result_title(quick), "完了しました");
-        assert_eq!(
-            result_step(quick, line(Step::Write, Mark::Done)),
-            "書き込み完了"
-        );
+        assert_eq!(result_step(quick, line(Step::Write, Mark::Done)), "完了");
         assert_eq!(
             result_step(quick, line(Step::Verify, Mark::Done)),
             "クイック検証完了"
@@ -991,10 +1001,7 @@ mod tests {
     fn verify_none_never_claims_a_verified_or_usable_drive() {
         let case = ResultCase::WrittenWithoutVerify;
         assert_eq!(result_title(case), "書き込みが完了しました");
-        assert_eq!(
-            result_step(case, line(Step::Verify, Mark::Skipped)),
-            "検証なし"
-        );
+        assert_eq!(result_step(case, line(Step::Verify, Mark::Skipped)), "なし");
         assert_eq!(result_message(case), "書き込み後の検証は行っていません。");
         let said = everything_said(case);
         for forbidden in ["検証済み", "使用できます", "正常", "安全"] {
@@ -1008,7 +1015,7 @@ mod tests {
         assert_eq!(result_title(case), "書き込みは完了しています");
         assert_eq!(
             result_step(case, line(Step::Verify, Mark::Cancelled)),
-            "検証は完了していません"
+            "中止"
         );
         assert_eq!(result_message(case), "書き込み後の検証は完了していません。");
         // Not worded as an error: the lines it actually shows.
@@ -1030,12 +1037,9 @@ mod tests {
         assert_eq!(result_title(case), "検証で問題が見つかりました");
         assert_eq!(
             result_step(case, line(Step::Verify, Mark::Failed)),
-            "読み戻したデータが一致しませんでした"
+            "不一致"
         );
-        assert_eq!(
-            result_step(case, line(Step::Write, Mark::Done)),
-            "書き込み完了"
-        );
+        assert_eq!(result_step(case, line(Step::Write, Mark::Done)), "完了");
         let message = result_message(case);
         assert!(message.contains("おすすめしません"), "{message}");
         let said = everything_said(case);
@@ -1049,7 +1053,7 @@ mod tests {
         assert_eq!(result_title(during), "検証を完了できませんでした");
         assert_eq!(
             result_step(during, line(Step::Verify, Mark::Failed)),
-            "検証中に問題が発生しました"
+            "完了できず"
         );
         assert!(result_message(during).starts_with("書き込みは完了しています"));
         assert!(!everything_said(during).contains("一致しませんでした"));
@@ -1057,7 +1061,7 @@ mod tests {
         let before = ResultCase::VerifyNotCompleted(Reason::VerifyOpenFailed);
         assert_eq!(
             result_step(before, line(Step::Verify, Mark::Failed)),
-            "検証を開始できませんでした"
+            "開始できず"
         );
     }
 
@@ -1373,7 +1377,7 @@ mod tests {
         ] {
             assert!(!mark_label(mark).is_empty());
         }
-        assert_eq!(mark_label(Mark::Skipped), "検証なし");
+        assert_eq!(mark_label(Mark::Skipped), "なし");
     }
 
     #[test]
@@ -1402,5 +1406,205 @@ mod tests {
         ] {
             assert_ne!(mark_icon(Mark::Skipped), failure_like);
         }
+    }
+
+    // ---- The steps on the result view ----
+
+    use crate::operation::Ending;
+    use crate::result::{RemovalPresentation, view};
+
+    const ALL_MODES: [VerifyMode; 3] = [VerifyMode::Quick, VerifyMode::Full, VerifyMode::None];
+
+    fn every_ending() -> Vec<Ending> {
+        let mut endings = vec![
+            Ending::Verified(VerifyMode::Quick),
+            Ending::Verified(VerifyMode::Full),
+            Ending::WrittenWithoutVerify,
+            Ending::CancelledBeforeWrite,
+            Ending::CancelledDuringWrite {
+                target_modified: true,
+            },
+            Ending::CancelledDuringWrite {
+                target_modified: false,
+            },
+            Ending::CancelledDuringVerify,
+            Ending::WriteFailed {
+                reason: Reason::WriteError,
+                target_modified: true,
+            },
+            Ending::VerifyFailed {
+                reason: Reason::VerifyMismatch,
+            },
+            Ending::VerifyFailed {
+                reason: Reason::VerifyReadError,
+            },
+            Ending::VerifyFailed {
+                reason: Reason::VerifyOpenFailed,
+            },
+            Ending::Lost,
+        ];
+        for at in [Step::Prepare, Step::Write] {
+            endings.push(Ending::NotStarted {
+                at,
+                reason: Reason::AccessDenied,
+            });
+        }
+        endings
+    }
+
+    // The three steps as the result view shows them: (words, icon).
+    fn result_steps(ending: Ending, mode: VerifyMode) -> [(&'static str, &'static str); 3] {
+        let shown =
+            view(ending, mode, &RemovalPresentation::<()>::Unavailable).expect("a result view");
+        shown
+            .steps
+            .map(|line| (result_step(shown.case, line), result_mark_icon(line.mark)))
+    }
+
+    #[test]
+    fn a_result_never_shows_a_step_as_still_to_come_or_running() {
+        for ending in every_ending() {
+            for mode in ALL_MODES {
+                for (words, icon) in result_steps(ending, mode) {
+                    for in_progress in [mark_label(Mark::Waiting), mark_label(Mark::Active)] {
+                        assert_ne!(words, in_progress, "{ending:?} {mode:?}");
+                    }
+                    for in_progress in [mark_icon(Mark::Waiting), mark_icon(Mark::Active)] {
+                        assert_ne!(icon, in_progress, "{ending:?} {mode:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_never_reached_was_not_run() {
+        // A write stopped by the user (the real Cancellation Case).
+        let steps = result_steps(
+            Ending::CancelledDuringWrite {
+                target_modified: true,
+            },
+            VerifyMode::Full,
+        );
+        assert_eq!(steps.map(|(words, _)| words), ["完了", "中止", "未実施"]);
+        assert_eq!(
+            result_steps(Ending::CancelledBeforeWrite, VerifyMode::Quick).map(|(words, _)| words),
+            ["中止", "未実施", "未実施"]
+        );
+        assert_eq!(
+            result_steps(
+                Ending::NotStarted {
+                    at: Step::Prepare,
+                    reason: Reason::TargetNotFound,
+                },
+                VerifyMode::Full,
+            )
+            .map(|(words, _)| words),
+            ["失敗", "未実施", "未実施"]
+        );
+        // Not run reads like not requested: neither still to come nor failed.
+        assert_eq!(steps[2].1, mark_icon(Mark::Skipped));
+    }
+
+    #[test]
+    fn with_verify_none_an_unreached_verify_is_none_not_unrun() {
+        for ending in [
+            Ending::WrittenWithoutVerify,
+            Ending::CancelledBeforeWrite,
+            Ending::CancelledDuringWrite {
+                target_modified: true,
+            },
+            Ending::WriteFailed {
+                reason: Reason::SyncError,
+                target_modified: true,
+            },
+        ] {
+            assert_eq!(
+                result_steps(ending, VerifyMode::None)[2].0,
+                "なし",
+                "{ending:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_final_step_state_has_its_own_short_words() {
+        let verify = |ending| result_steps(ending, VerifyMode::Full)[2].0;
+        assert_eq!(verify(Ending::Verified(VerifyMode::Full)), "完全検証完了");
+        assert_eq!(
+            result_steps(Ending::Verified(VerifyMode::Quick), VerifyMode::Quick)[2].0,
+            "クイック検証完了"
+        );
+        assert_eq!(verify(Ending::CancelledDuringVerify), "中止");
+        assert_eq!(
+            verify(Ending::VerifyFailed {
+                reason: Reason::VerifyMismatch
+            }),
+            "不一致"
+        );
+        assert_eq!(
+            verify(Ending::VerifyFailed {
+                reason: Reason::VerifyReadError
+            }),
+            "完了できず"
+        );
+        assert_eq!(
+            verify(Ending::VerifyFailed {
+                reason: Reason::VerifyOpenFailed
+            }),
+            "開始できず"
+        );
+        let write = |ending| result_steps(ending, VerifyMode::Full)[1].0;
+        assert_eq!(
+            write(Ending::WriteFailed {
+                reason: Reason::WriteError,
+                target_modified: true,
+            }),
+            "完了できず"
+        );
+        assert_eq!(
+            write(Ending::NotStarted {
+                at: Step::Write,
+                reason: Reason::AccessDenied,
+            }),
+            "開始できず"
+        );
+        assert_eq!(
+            result_steps(Ending::Lost, VerifyMode::Full).map(|(words, _)| words),
+            ["失敗"; 3]
+        );
+    }
+
+    // Under each step's name, side by side: a few words, never a sentence
+    // (the result message says the rest).
+    #[test]
+    fn result_step_words_are_short() {
+        for case in every_case() {
+            for step in [Step::Prepare, Step::Write, Step::Verify] {
+                for mark in [
+                    Mark::Waiting,
+                    Mark::Active,
+                    Mark::Done,
+                    Mark::Skipped,
+                    Mark::Cancelled,
+                    Mark::Failed,
+                ] {
+                    let words = result_step(case, StepLine { step, mark });
+                    assert!(words.chars().count() <= 8, "{case:?} {step:?}: {words}");
+                    for sentence_like in ["。", "（", "ました", "ません"] {
+                        assert!(!words.contains(sentence_like), "{words}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_result_has_the_same_icon_as_its_failed_step() {
+        assert_eq!(result_icon(ResultKind::Failed), mark_icon(Mark::Failed));
+        assert_eq!(
+            result_icon(ResultKind::Cancelled),
+            mark_icon(Mark::Cancelled)
+        );
     }
 }
