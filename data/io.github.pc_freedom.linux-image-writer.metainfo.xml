@@ -75,7 +75,7 @@
   </screenshots>
 
   <releases>
-    <release version="0.1.0" date="2026-10-01">
+    <release version="0.1.0" date="2026-10-02">
       <description>
         <p>First release of Linux Image Writer, a GTK 4 and libadwaita app for writing disk images to USB drives on Linux.</p>
         <p xml:lang="ja">Linux Image Writer の最初のリリースです。Linux でディスクイメージを USB ドライブに書き込む、GTK 4 と libadwaita のアプリです。</p>
