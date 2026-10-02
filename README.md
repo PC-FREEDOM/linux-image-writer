@@ -10,7 +10,7 @@ A simple USB image writer for Linux, designed with safety in mind.
 
 ## Status
 
-Linux Image Writer is currently being developed toward its first release (v0.1).
+Linux Image Writer v0.1.0 is the first public release.
 No official packages are published yet.
 
 ## Features
