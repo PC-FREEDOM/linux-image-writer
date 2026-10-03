@@ -1,6 +1,12 @@
 /target
 /reports/latest.md
 
+# AppImage build outputs
+/build-aux/appimage/out/
+
+# Release outputs (build-aux/release/release.sh)
+/build-aux/release/out/
+
 # Flatpak build outputs
 .flatpak-builder/
 build-dir/

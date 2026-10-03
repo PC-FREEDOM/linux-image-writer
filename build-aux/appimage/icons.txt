@@ -1,0 +1,27 @@
+# Every symbolic icon the GUI names (src/bin/linux-image-writer), and where
+# the AppImage gets it. build.sh fails when the GUI names an icon not listed
+# here, or this file lists one it no longer names.
+#
+#   gtk        embedded in the bundled GTK 4 or libadwaita (checked at build)
+#   adwaita    copied from Ubuntu 24.04's Adwaita icon theme into the AppDir
+#              (usr/share/icons/hicolor/scalable/<context>/)
+#
+# Only icons GTK and libadwaita lack are copied; the icon theme as a whole is
+# never bundled.
+#
+# name                              source    context
+changes-prevent-symbolic            gtk
+content-loading-symbolic            adwaita   status
+dialog-error-symbolic               gtk
+dialog-information-symbolic         gtk
+dialog-warning-symbolic             gtk
+document-open-symbolic              gtk
+drive-removable-media-symbolic      adwaita   devices
+emblem-ok-symbolic                  adwaita   emblems
+go-down-symbolic                    gtk
+go-next-symbolic                    gtk
+list-remove-symbolic                gtk
+media-playback-start-symbolic       gtk
+media-skip-forward-symbolic         adwaita   actions
+process-stop-symbolic               adwaita   actions
+window-close-symbolic               gtk

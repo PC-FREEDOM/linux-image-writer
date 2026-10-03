@@ -1,0 +1,41 @@
+#!/bin/sh
+# Launcher of the Linux Image Writer AppImage. See README.md, "AppRun".
+#
+# Points GTK, GLib and gdk-pixbuf at the resources and modules inside the
+# AppImage, and nothing more (five variables):
+# libraries are found through the RUNPATH linuxdeploy set on every ELF file,
+# so no LD_LIBRARY_PATH; the display backend, renderer, theme and D-Bus are
+# the host's, untouched. Never runs anything with elevated privileges.
+set -eu
+
+# Set by the AppImage runtime; found from this script's location when the
+# AppDir is run directly.
+if [ -z "${APPDIR:-}" ]; then
+    APPDIR=$(dirname -- "$(readlink -f -- "$0")")
+fi
+
+# The AppImage's icons and GSettings schemas first; the host's data
+# directories stay after them (the XDG default when none are set).
+XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# GTK's own schemas, compiled for the bundled GLib.
+GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
+# GIO modules built for the bundled GLib only, never the host's.
+GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
+# The bundled gdk-pixbuf's SVG loader, which GTK needs to draw symbolic icons
+# that are SVG only (libadwaita's own, and the icon theme's). The cache names
+# the loader without a directory, so it is found next to the libraries and
+# the file needs no rewriting for wherever the AppImage is mounted.
+GDK_PIXBUF_MODULE_FILE="$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+# Where the bundled GTK looks for its loadable modules (immodules, media,
+# printbackends, inspector): $GTK_EXE_PREFIX/lib/gtk-4.0, which the AppImage
+# does not have, so it loads none. Not for themes or GTK's data (that would
+# be GTK_DATA_PREFIX, never set). Without it, GTK looks in the directory it
+# was built for, /usr/lib/x86_64-linux-gnu/gtk-4.0 -- on Debian and Ubuntu
+# hosts, the host's GTK modules, built for another GTK and GLib (measured:
+# ibus, fcitx5 and GStreamer modules loaded, one failing on a missing GLib
+# symbol). The app uses no media or printing, and has no text entry of its
+# own (README.md, "AppRun").
+GTK_EXE_PREFIX="$APPDIR/usr"
+export XDG_DATA_DIRS GSETTINGS_SCHEMA_DIR GIO_MODULE_DIR GDK_PIXBUF_MODULE_FILE GTK_EXE_PREFIX
+
+exec "$APPDIR/usr/bin/linux-image-writer" "$@"

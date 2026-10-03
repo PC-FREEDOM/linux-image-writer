@@ -1,0 +1,92 @@
+# Libraries that are never bundled into the AppImage: they always come from
+# the host. One shell glob per line, matched against a library's file name
+# and its SONAME; text after '#' is a comment.
+#
+# build.sh passes every pattern to linuxdeploy (--exclude-library), and
+# check-appdir.sh fails the build if a matching file is in the AppDir anyway.
+# Only decided exclusions are listed; undecided ones are at the end, commented
+# out, under "Pending".
+#
+# Beyond these names, check-appdir.sh also rejects files by their Ubuntu
+# package (glibc, Mesa and GPU drivers, UDisks2, D-Bus, polkit, kernel
+# modules) and by path (driver modules, kernel modules), so a renamed or
+# unexpected file is caught too.
+
+# ---- glibc and the dynamic loader ----
+# The host's C library: the AppImage targets glibc 2.39 and later, and a
+# bundled glibc cannot work with the host's dynamic loader.
+ld-linux-x86-64.so.2
+libc.so.6
+libm.so.6
+libmvec.so.1
+libpthread.so.*
+libdl.so.*
+librt.so.*
+libresolv.so.*
+libutil.so.*
+libanl.so.*
+libnsl.so.*
+libnss_*.so.*
+libBrokenLocale.so.*
+libthread_db.so.*
+libc_malloc_debug.so.*
+
+# ---- Graphics: libraries bound to the host's GPU driver ----
+# libglvnd dispatch (GL, EGL, GLX, GLES) and the vendor libraries it loads,
+# GBM and libdrm: they must match the host's Mesa or vendor driver and its
+# kernel driver. GTK reaches GL through libepoxy, which loads them from the
+# host at run time.
+libGL.so.*
+libEGL.so.*
+libGLX.so.*
+libGLdispatch.so.*
+libOpenGL.so.*
+libGLESv1_CM.so.*
+libGLESv2.so.*
+libglapi.so.*
+libGLX_*.so.*
+libEGL_*.so.*
+libgbm.so.*
+libdrm.so.*
+libdrm_*.so.*
+# GPU driver code itself (Mesa, NVIDIA, ...). Not to be confused with
+# libvulkan.so.1, the Vulkan loader (see Pending).
+libgallium*.so*
+libvulkan_*.so*
+libnvidia-*.so*
+libcuda.so.*
+
+# ---- Libraries shared with the host's GPU driver and display stack ----
+# The host's Mesa (and LLVM) load into the same process and need these in
+# versions at least as new as their own; a bundled older copy would be
+# picked instead and could keep the driver from loading. Measured (step 4/5):
+# - libgcc_s: bundled ELF files need only GCC_4.2.0.
+# - libstdc++: needed only by ICU and LERC, up to GLIBCXX_3.4.30 (GCC 12);
+#   host Mesa and LLVM link the same library.
+# - libwayland-client: host Mesa's EGL and Vulkan drivers use functions that
+#   Ubuntu 24.04's 1.22 lacks (wl_display_create_queue_with_name,
+#   wl_display_dispatch_queue_timeout, wl_fixes_interface).
+# - libX11 and libxcb: the core X11 libraries host Mesa's GLX / EGL use.
+# At run time (Wayland and X11), all five came from the host while GTK drew
+# with the host's Mesa (GL, and Vulkan when forced).
+libgcc_s.so.1
+libstdc++.so.6
+libwayland-client.so.0
+libX11.so.6
+libxcb.so.1
+# Needed only by the host's libxcb, never by a bundled file: libxcb loads
+# its own (measured: the bundled copies were never mapped), so bundling them
+# only adds dead files.
+libXau.so.6
+libXdmcp.so.6
+libbsd.so.0
+libmd.so.0
+
+# ---- Still bundled, kept under review (NOT enforced) ----
+# Measured working with the host's Mesa 26.2 on Wayland and X11; to be
+# confirmed on other distributions (README.md, "Still to be decided").
+#libwayland-egl.so.1     # bundle: standalone (needs only libc/libm); GTK links it
+#libvulkan.so.1          # bundle: the Vulkan loader, not a driver; GTK links it, renders with GL by default
+#libxcb-render.so.0, libxcb-shm.so.0, libXext.so.6, libXi.so.6, libXfixes.so.3,
+#libXrandr.so.2, libXinerama.so.1, libXcursor.so.1, libXdamage.so.1, libXrender.so.1
+#                        # bundle for now: GTK / cairo link them; host Mesa also uses libXext and libxcb-shm

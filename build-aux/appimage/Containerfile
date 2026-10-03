@@ -1,0 +1,137 @@
+# Build environment for the Linux Image Writer AppImage.
+#
+# Ubuntu 24.04 LTS (glibc 2.39, GTK 4.14, libadwaita 1.5): the AppImage built
+# here runs on distributions with glibc 2.39 or later. See README.md.
+#
+# Build the image from the repository root (rust-toolchain.toml and
+# build-aux/rust-licenses/cargo-about.lock are the only files it copies; the
+# source itself is mounted at run time):
+#
+#   podman build -t linux-image-writer-appimage-build \
+#     -f build-aux/appimage/Containerfile .
+#
+# This image only builds; it never touches devices and needs no privileges.
+
+# ubuntu:24.04, pinned to its multi-arch index digest. To update: look up the
+# tag's current index digest, replace it here and record the change.
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60
+
+FROM ${UBUNTU_IMAGE}
+# (Declared again to be usable below FROM, in the image's labels.)
+ARG UBUNTU_IMAGE
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Every package comes from this Ubuntu Snapshot Service point in time
+# (https://snapshot.ubuntu.com), not from the live archive, so the set of
+# packages -- and so the libraries the AppImage bundles -- does not depend on
+# the day the image is built. Updated deliberately; see README.md.
+ARG UBUNTU_SNAPSHOT=20261002T130000Z
+
+# apt reads the snapshot from APT::Snapshot (the same as `--snapshot`) and
+# fetches it over HTTPS, but the base image has no CA certificates. So
+# ca-certificates itself is installed from the snapshot with TLS peer
+# verification off for snapshot.ubuntu.com, for that one step only: apt still
+# verifies the archive's signature (the base image's Ubuntu keyring) and every
+# package's hash, so what is installed cannot be altered in transit. Every
+# later fetch verifies TLS as usual.
+RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50snapshot \
+ && apt-get -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
+ && apt-get -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false \
+      install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build tools, the GTK 4 / libadwaita development files, and what later steps
+# of the AppImage build use:
+#   gettext                 msgfmt for po/<lang>.po
+#   patchelf, file          inspecting and adjusting the bundled ELF files
+#   desktop-file-utils      desktop-file-validate
+#   appstream               appstreamcli validate (MetaInfo)
+#   libgtk-4-bin            gtk4-encode-symbolic-svg and GTK's own tools
+#   libglib2.0-bin          glib-compile-schemas
+#   librsvg2-common         the gdk-pixbuf SVG loader (bundling it is decided by measurement)
+#   librsvg2-bin            rsvg-convert (a PNG .DirIcon, if one is chosen)
+#   adwaita-icon-theme      source of the symbolic icons the GUI uses
+#   curl, ca-certificates   fetching rustup, cargo-about and the pinned AppImage tools
+#   zstd                    compressing the third-party source archive
+#   git                     the application's source archive (git archive of
+#                           the release tag; build-aux/release/release.sh)
+#   python3                 checking the Rust crates' licence document
+#                           (build-aux/rust-licenses/check.py; already a
+#                           dependency of libglib2.0-dev, named for clarity)
+# (from the snapshot above, with TLS verified).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      adwaita-icon-theme \
+      appstream \
+      build-essential \
+      ca-certificates \
+      curl \
+      desktop-file-utils \
+      file \
+      gettext \
+      git \
+      libadwaita-1-dev \
+      libglib2.0-bin \
+      libgtk-4-bin \
+      libgtk-4-dev \
+      librsvg2-bin \
+      librsvg2-common \
+      patchelf \
+      pkg-config \
+      python3 \
+      zstd \
+ && rm -rf /var/lib/apt/lists/*
+
+# Rust from rustup, never Ubuntu's rustc. rustup-init is pinned by version
+# and SHA-256; the toolchain itself is the one rust-toolchain.toml names.
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_INIT_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
+ && rm /tmp/rustup-init
+
+# Installs the toolchain rust-toolchain.toml names (with its profile), so the
+# image and the repository cannot disagree on the Rust version.
+WORKDIR /opt/toolchain
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install \
+ && rustc --version \
+ && cargo --version
+
+# cargo-about, which generates the Rust crates' licence document, at the
+# release build-aux/rust-licenses/cargo-about.lock pins: the upstream
+# release archive and the executable in it are both checked by SHA-256
+# (generate.sh checks the executable again on every use). Never `cargo
+# install`, which would build whatever is newest that day.
+COPY build-aux/rust-licenses/cargo-about.lock /opt/cargo-about/cargo-about.lock
+RUN lock=/opt/cargo-about/cargo-about.lock \
+ && version=$(sed -n 's/^CARGO_ABOUT_VERSION=//p' "$lock") \
+ && target=$(sed -n 's/^CARGO_ABOUT_TARGET=//p' "$lock") \
+ && url=$(sed -n 's/^CARGO_ABOUT_URL=//p' "$lock") \
+ && sha256=$(sed -n 's/^CARGO_ABOUT_SHA256=//p' "$lock") \
+ && binary_sha256=$(sed -n 's/^CARGO_ABOUT_BINARY_SHA256=//p' "$lock") \
+ && test -n "$version" && test -n "$target" && test -n "$sha256" && test -n "$binary_sha256" \
+ && case "$url" in https://*) ;; *) echo "cargo-about.lock: the URL must be https" >&2; exit 1 ;; esac \
+ && curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/cargo-about.tar.gz "$url" \
+ && echo "${sha256}  /tmp/cargo-about.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/cargo-about.tar.gz -C /tmp "cargo-about-${version}-${target}/cargo-about" \
+ && echo "${binary_sha256}  /tmp/cargo-about-${version}-${target}/cargo-about" | sha256sum -c - \
+ && install -m755 "/tmp/cargo-about-${version}-${target}/cargo-about" /usr/local/bin/cargo-about \
+ && rm -rf /tmp/cargo-about.tar.gz "/tmp/cargo-about-${version}-${target}" \
+ && test "$(cargo-about --version)" = "cargo-about ${version}"
+
+# The pinned inputs, readable later with `podman image inspect`.
+LABEL io.github.pc_freedom.linux-image-writer.base-image="${UBUNTU_IMAGE}" \
+      io.github.pc_freedom.linux-image-writer.ubuntu-snapshot="${UBUNTU_SNAPSHOT}" \
+      io.github.pc_freedom.linux-image-writer.rustup-version="${RUSTUP_VERSION}"
+
+WORKDIR /src

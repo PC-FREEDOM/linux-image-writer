@@ -1,0 +1,39 @@
+# Libraries the AppImage takes from the host: the only libraries an ELF file
+# in the AppDir may resolve outside it. One SONAME per line; text after '#'
+# is a comment.
+#
+# check-appdir.sh fails the build when any dependency resolves outside the
+# AppDir and is not listed here. The build container has every development
+# package installed, so a library that should have been bundled would
+# otherwise resolve "on the host" there and pass unnoticed. A new entry is a
+# decision: add it only with the reason it must come from the host.
+#
+# The list is what the step 4 build measured (linuxdeploy's own exclude list
+# plus glibc); see README.md, "What is bundled, and what is not".
+
+# ---- glibc and the dynamic loader ----
+ld-linux-x86-64.so.2
+libc.so.6
+libm.so.6
+libresolv.so.2
+
+# ---- Compiler runtime: shared with the host's Mesa / LLVM ----
+libgcc_s.so.1
+libstdc++.so.6
+
+# ---- Display: shared with the host's GPU driver and display server ----
+libwayland-client.so.0      # host Mesa needs functions Ubuntu 24.04's 1.22 lacks
+libX11.so.6
+libxcb.so.1
+
+# ---- Fonts and text shaping: match the host's font configuration ----
+libfontconfig.so.1
+libfreetype.so.6
+libharfbuzz.so.0
+libfribidi.so.0
+
+# ---- Other base libraries linuxdeploy's exclude list leaves to the host ----
+libz.so.1
+libgmp.so.10
+libgpg-error.so.0
+libcom_err.so.2

@@ -1,0 +1,260 @@
+# cargo-about configuration for THIRD-PARTY-LICENSES.txt: the licences of the
+# Rust crates the linux-image-writer GUI is built from. See README.md.
+#
+# Every licence accepted here was found in the dependency graph and reviewed;
+# nothing is accepted "in case". A crate whose licence expression these
+# entries cannot satisfy makes generation fail (cargo-about --fail), and is
+# reviewed before anything is added.
+
+# The licences under which crates may be used, in order of preference: where
+# a crate offers a choice ("MIT OR Apache-2.0", "Unlicense OR MIT", ...),
+# cargo-about uses the first one listed here that satisfies it. MIT is the
+# only licence accepted for every crate: every crate in the graph offers it
+# (alone or as one of its choices), it is compatible with the app's
+# GPL-3.0-or-later, and its only condition is to carry the copyright notice
+# and licence text, which THIRD-PARTY-LICENSES.txt does. Licences one crate
+# needs beyond it are accepted for that crate only (below).
+accepted = ["MIT"]
+
+# The platforms the GUI is built for: the AppImage (x86_64) and the Flatpak
+# (x86_64, aarch64). Crates only other platforms use are left out.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+# Build scripts' dependencies (cc, pkg-config, system-deps, ...) run on the
+# build machine and are not part of the program; dev-dependencies are only
+# for the tests. Procedural macros are kept: the code they generate is
+# compiled into the program.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+# ---- Crate-specific configuration (cargo-about requires it to come last) ----
+#
+# Each clarification names the files that are the crate's licence statement,
+# with their SHA-256: cargo-about uses the clarification only if every file
+# still matches, and generate.sh fails if one does not (cargo-about itself
+# would only log a warning and fall back to guessing). Paths are relative to
+# the crate's root.
+
+# The app itself (the root of the graph; its LICENSE is shipped on its own,
+# and THIRD-PARTY-LICENSES.txt leaves it out).
+[linux-image-writer]
+accepted = ["GPL-3.0-or-later"]
+
+# Contains code from futures-rs and Tokio; LICENSE-THIRD-PARTY gives their
+# copyright notices (Alex Crichton, The Tokio Authors) under Apache-2.0 OR
+# MIT, and is kept whole.
+[atomic-waker.clarify]
+license = "Apache-2.0 OR MIT"
+[[atomic-waker.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+[[atomic-waker.clarify.files]]
+path = "LICENSE-THIRD-PARTY"
+license = "Apache-2.0 OR MIT"
+checksum = "6226d0632e2e1a80c23597e964da9812ae193c535fe058154afb034e94167aa5"
+
+# The same LICENSE-THIRD-PARTY as atomic-waker.
+[futures-lite.clarify]
+license = "Apache-2.0 OR MIT"
+[[futures-lite.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+[[futures-lite.clarify.files]]
+path = "LICENSE-THIRD-PARTY"
+license = "Apache-2.0 OR MIT"
+checksum = "6226d0632e2e1a80c23597e964da9812ae193c535fe058154afb034e94167aa5"
+
+# Contains code from the Rust standard library; LICENSE-THIRD-PARTY gives
+# its notice (The Rust Project Developers, Apache-2.0 OR MIT).
+[parking.clarify]
+license = "Apache-2.0 OR MIT"
+[[parking.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+[[parking.clarify.files]]
+path = "LICENSE-THIRD-PARTY"
+license = "Apache-2.0 OR MIT"
+checksum = "9a6d7a3c1b8edcc706c4b6c37f8dae9a77f02c7f9051df603f975db136b55419"
+
+# With the "static" feature (Cargo.toml), its build script compiles XZ
+# Utils' liblzma from xz/ into the program: xz/src/liblzma and
+# xz/src/common/tuklib_*.c, every one of them "SPDX-License-Identifier:
+# 0BSD". The crate's own expression covers only its Rust code.
+[liblzma-sys]
+accepted = ["0BSD"]
+[liblzma-sys.clarify]
+license = "(MIT OR Apache-2.0) AND 0BSD"
+[[liblzma-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "a90e2da47bdc152cfb89e1fb09972143056c417ddbf86122babc83d0a8ad81d1"
+[[liblzma-sys.clarify.files]]
+path = "xz/COPYING"
+license = "0BSD"
+checksum = "616a3ad264ce29b8f1cb97e53037b139d406899ca8d1f799651e17bfa09830b8"
+[[liblzma-sys.clarify.files]]
+path = "xz/COPYING.0BSD"
+license = "0BSD"
+checksum = "0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1"
+
+# Its Unicode tables (src/unicode_tables/) are generated from the Unicode
+# Character Database, under the Unicode data files licence that
+# src/unicode_tables/LICENSE-UNICODE gives (Unicode-DFS-2016); the crate's
+# own expression covers only its Rust code. Linked through gettext-rs ->
+# locale_config -> regex.
+[regex-syntax]
+accepted = ["Unicode-DFS-2016"]
+[regex-syntax.clarify]
+license = "(MIT OR Apache-2.0) AND Unicode-DFS-2016"
+[[regex-syntax.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+[[regex-syntax.clarify.files]]
+path = "src/unicode_tables/LICENSE-UNICODE"
+license = "Unicode-DFS-2016"
+checksum = "74db5baf44a41b1000312c673544b3374e4198af5605c7f9080a402cec42cfa3"
+
+# Contains a copy of the spin crate (src/spin/, MIT, Mathijs van de Nes).
+[tracing-core.clarify]
+license = "MIT"
+[[tracing-core.clarify.files]]
+path = "LICENSE"
+checksum = "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1"
+[[tracing-core.clarify.files]]
+path = "src/spin/LICENSE"
+checksum = "58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79"
+
+# Its Unicode tables are under the Unicode licence v3 (LICENSE-UNICODE).
+[unicode-ident]
+accepted = ["Unicode-3.0"]
+
+# rustix and linux-raw-sys: COPYRIGHT is their copyright statement (held by
+# the contributors; some code derived from the Rust standard library); their
+# LICENSE-MIT has no copyright line.
+[rustix.clarify]
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+[[rustix.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+[[rustix.clarify.files]]
+path = "COPYRIGHT"
+checksum = "377c2e7c53250cc5905c0b0532d35973392af16ffb9596a41d99d202cf3617c9"
+
+[linux-raw-sys.clarify]
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+[[linux-raw-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+[[linux-raw-sys.clarify.files]]
+path = "COPYRIGHT"
+checksum = "3290ae0fbc9ddb77d2239121d710f0bb9d31b3b4744e6d97fe01e652b4c1870b"
+
+# The gtk-rs crates (bindings, not the GNOME libraries themselves): LICENSE
+# has no copyright line, and COPYRIGHT is the project's copyright statement
+# (held by the contributors), so both are kept. The -sys crates have no
+# COPYRIGHT file. All the same two files in every one of these crates.
+[cairo-rs.clarify]
+license = "MIT"
+[[cairo-rs.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[cairo-rs.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[gdk-pixbuf.clarify]
+license = "MIT"
+[[gdk-pixbuf.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[gdk-pixbuf.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[gdk4.clarify]
+license = "MIT"
+[[gdk4.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[gdk4.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[gio.clarify]
+license = "MIT"
+[[gio.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[gio.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[glib.clarify]
+license = "MIT"
+[[glib.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[glib.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[glib-macros.clarify]
+license = "MIT"
+[[glib-macros.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[glib-macros.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[graphene-rs.clarify]
+license = "MIT"
+[[graphene-rs.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[graphene-rs.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[gsk4.clarify]
+license = "MIT"
+[[gsk4.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[gsk4.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[gtk4.clarify]
+license = "MIT"
+[[gtk4.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[gtk4.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[gtk4-macros.clarify]
+license = "MIT"
+[[gtk4-macros.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[gtk4-macros.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"
+
+[pango.clarify]
+license = "MIT"
+[[pango.clarify.files]]
+path = "LICENSE"
+checksum = "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+[[pango.clarify.files]]
+path = "COPYRIGHT"
+checksum = "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d"

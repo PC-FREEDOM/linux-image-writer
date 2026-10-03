@@ -1,0 +1,175 @@
+# How the licences of the bundled Ubuntu packages are classified, and so which
+# packages' corresponding source the AppImage's release carries. Read by
+# check-appdir.sh, which writes the result into out/license-manifest.txt.
+#
+# A package's classes are taken from its copyright file (as installed by the
+# package, usr/share/doc/<package>/copyright):
+#   - machine-readable (DEP-5) files: every name in their "License:" fields,
+#     split at "or", "and" and ",", with any "with ... exception" removed,
+#     looked up in [names] below;
+#   - other files: the [packages] entry below, written after reading the file,
+#     and tied to its SHA-256.
+# The build fails on a name or a file not reviewed here, and when a reviewed
+# file changes, so a snapshot update cannot change a classification unseen.
+#
+# Classes:
+#   GPL, LGPL, MPL, GFDL, CC-BY-SA   copyleft
+#   permissive, public-domain        no copyleft
+#   unreviewed                       not (yet) confirmed from the text
+# Corresponding source is carried for every package with any class other than
+# permissive or public-domain -- also when the copyleft licence is only one of
+# several alternatives ("BSD or GPL-2+"), and when a name is unreviewed. This
+# is deliberately on the safe side: it may carry more source than strictly
+# required, never less.
+
+[names]
+# name                              class           basis
+GPL                                 GPL             GNU GPL
+GPL-1+                              GPL             GNU GPL
+GPL-2                               GPL             GNU GPL
+GPL-2+                              GPL             GNU GPL (also with Autoconf / Libtool / distribution / Linux-syscall-note exceptions)
+GPL-3                               GPL             GNU GPL
+GPL-3+                              GPL             GNU GPL (also with Autoconf / Libtool exceptions)
+LGPL                                LGPL            GNU LGPL
+LGPL-2+                             LGPL            GNU LGPL
+LGPL-2.1                            LGPL            GNU LGPL
+LGPL-2.1+                           LGPL            GNU LGPL
+LGPL-2.1+~OpenSSL                   LGPL            GNU LGPL with an OpenSSL linking exception
+LGPL-3+                             LGPL            GNU LGPL
+cmph                                LGPL            text: "LGPL-2 and MPL 1.1" / "LGPL-2.1-only or MPL-1.1" (libglib2.0-0t64)
+MPL-1.1                             MPL             Mozilla Public License
+MPL-2.0                             MPL             Mozilla Public License
+GFDL-NIV-1.2+                       GFDL            GNU FDL
+CC-BY-SA-3.0                        CC-BY-SA        Creative Commons share-alike
+CC-BY-SA-4.0                        CC-BY-SA        Creative Commons share-alike
+0BSD                                permissive      BSD family
+AFL-2.0                             permissive      text: Academic Free License 2.0 (libglib2.0-0t64)
+Apache-2                            permissive      Apache License 2.0
+Apache-2.0                          permissive      Apache License 2.0 (also with LLVM exception)
+BSD-2-clause                        permissive      BSD family
+BSD-2.2-clause                      permissive      BSD family
+BSD-3-Clause                        permissive      BSD family
+BSD-3-Clause-Attribution            permissive      BSD family
+BSD-3-clause                        permissive      BSD family
+BSD-3-clause-California             permissive      BSD family
+BSD-3-clause-Cambridge              permissive      BSD family (with a binary-library exception)
+BSD-3-clause-Google                 permissive      BSD family
+BSD-3-clause-JANET                  permissive      BSD family
+BSD-3-clause-PADL                   permissive      BSD family
+BSD-3-clause-variant                permissive      BSD family
+BSD-3-snowball                      permissive      BSD family
+BSD-4-Clause-UC                     permissive      BSD family
+BSD-4-clause                        permissive      BSD family
+BSD-4-clause-California             permissive      BSD family
+BSD-4-clause-UC                     permissive      BSD family
+BSD-like-with-advertising-clause    permissive      BSD family
+BSD-variant                         permissive      text: "Redistribution and use in source and binary forms ... are permitted" (libbz2-1.0)
+Beerware                            permissive      text: "do whatever you want with this stuff" (libldap2)
+Bitstream-Vera                      permissive      text: "Permission is hereby granted, free of charge" (libpangoft2-1.0-0)
+Boost-1.0                           permissive      Boost Software License
+Expat                               permissive      MIT (Expat)
+expat                               permissive      MIT (Expat)
+Expat-ISC                           permissive      MIT (Expat) family
+Expat-UNM                           permissive      MIT (Expat) family
+F5                                  permissive      text: "under the same terms as OpenLDAP itself" (libldap2)
+FSF-unlimited                       permissive      FSF all-permissive family
+FSFAP                               permissive      FSF all-permissive
+FSFULLR                             permissive      FSF unlimited licence (retention)
+FreeSoftware                        permissive      text: FSF "unlimited permission to copy and/or distribute" (libunistring5)
+GAP                                 permissive      text: "Copying and distribution ... are permitted in any medium without royalty" (libhogweed6t64)
+IBM-as-is                           permissive      text: "made available by IBM Corporation on an AS IS basis" (libsasl2-2)
+ICU                                 permissive      ICU licence (X-style)
+ISC                                 permissive      ISC
+JCG                                 permissive      text: "Redistribution and use in source and binary forms are permitted" (libldap2)
+Janik-permissive                    permissive      named permissive in the file
+MIT                                 permissive      MIT
+MIT-1                               permissive      MIT family
+MIT-CMU                             permissive      MIT family
+MIT-Export                          permissive      MIT family
+MIT-OpenVision                      permissive      MIT family
+MIT-XC                              permissive      MIT family
+NTP                                 permissive      text: "Permission to use, copy, modify, and distribute ... is hereby granted" (libjpeg-turbo8)
+BSD-BY-LC-NE                        permissive      text: the IJG licence, "Permission is hereby granted to use, copy, modify, and distribute" (libjpeg-turbo8)
+Chromium                            permissive      text: BSD 3-clause, "Redistribution and use in source and binary forms ... are permitted" (libpsl5t64)
+gnulib                              permissive      text: FSF "unlimited permission to copy and/or distribute it" (libpsl5t64)
+Hylafax                             permissive      text: libtiff licence, "Permission to use, copy, modify, distribute, and sell" (libtiff6)
+NeoSoft-permissive                  permissive      named permissive in the file
+OFL-1.1                             permissive      SIL Open Font License (fonts; no source requirement for programs)
+SIL-1.1                             permissive      SIL Open Font License
+custom-sil-open-font-license        permissive      SIL Open Font License
+OLDAP-2.8                           permissive      OpenLDAP Public License (BSD-style)
+OpenLDAP                            permissive      OpenLDAP Public License (BSD-style)
+OpenLDAP-2.8                        permissive      OpenLDAP Public License (BSD-style)
+RSA-MD                              permissive      RSA MD4/MD5 licence
+Sun-permissive                      permissive      named permissive in the file
+sun-permissive                      permissive      named permissive in the file
+TCL                                 permissive      text: Tcl/Tk licence, BSD-style (libpangoft2-1.0-0)
+UMich                               permissive      text: "Redistribution and use ... permitted provided that this notice is preserved" (libldap2)
+Unicode                             permissive      Unicode licence
+Unicode-DFS-2016                    permissive      Unicode licence
+X11                                 permissive      MIT (X11)
+X11R5-permissive                    permissive      named permissive in the file
+ZPL-2.1                             permissive      text: "Redistribution and use in source and binary forms ... are permitted" (libgtk-4-common)
+Zlib                                permissive      zlib licence
+zlib                                permissive      zlib licence
+all-permissive                      permissive      named permissive in the file
+bzip2-1.0.6                         permissive      bzip2 licence (BSD-style)
+curl                                permissive      curl licence (MIT-style)
+lcs-telegraphics-permissive         permissive      named permissive in the file
+libpng                              permissive      libpng licence
+permissive                          permissive      named permissive in the file
+permissive-fsf                      permissive      named permissive in the file
+permissive-nowarranty               permissive      named permissive in the file
+CC-zero-waive-1.0-us                public-domain   CC0 waiver
+CC0-1.0                             public-domain   CC0
+Iconv-PD                            public-domain   public domain
+Kuchling-PD                         public-domain   public domain
+Mingw-PD                            public-domain   public domain
+PD                                  public-domain   public domain
+PD-debian                           public-domain   public domain
+Plumb-PD                            public-domain   public domain
+Unlicense                           public-domain   Unlicense
+none                                public-domain   text: "No copyright to license." (liblzma5)
+probably-PD                         public-domain   public domain
+public-domain                       public-domain   public domain
+unlicense                           public-domain   Unlicense
+Artistic                            unreviewed      Artistic licence; not reviewed further (appears with GPL alternatives)
+Autoconf                            unreviewed      licence text not reviewed
+BSLA                                unreviewed      licence text not reviewed
+Chromium-BSD-style                  unreviewed      licence text not reviewed
+Example                             unreviewed      licence text not reviewed
+config-h                            unreviewed      licence text not reviewed
+customFSFUL                         unreviewed      licence text not reviewed
+customFSFULLRWD                     unreviewed      licence text not reviewed
+noderivs                            unreviewed      text: the licence document's own copying terms (liblzma5)
+old-glib-tests                      unreviewed      licence text not reviewed
+
+[packages]
+# Copyright files that are not machine-readable, classified by reading them.
+# package                       copyright-sha256                                                  classes                        basis
+adwaita-icon-theme              b8058c6a4e62094c4c4a081b9681b3e67e2ffed995d6b8b5fe43a536745f04ba  LGPL,GPL,GFDL,CC-BY-SA,permissive  "License:" lines read: CC-BY-SA-3.0 or LGPL-3 (the theme), CC-BY-SA-4.0, GPL-2 / GPL-3+ / GPL-unspecified, GFDL-1.2+, CC-BY-3.0-US
+base-files                      fd7e4aae7e7b05f217bcf2d02322825c360e66c52c4c2f1b28d784d6297a1c23  GPL                            GPL-2+ ("either version 2 of the License, or (at your option) any later version")
+libcairo-gobject2               408fb9e704e875cd42d432e7c9b3b378f568e3c89db2b5c5ef3d11c025319574  LGPL,MPL,permissive            cairo: LGPL-2.1 or MPL-1.1; some files under X11-style permissions
+libcairo-script-interpreter2    408fb9e704e875cd42d432e7c9b3b378f568e3c89db2b5c5ef3d11c025319574  LGPL,MPL,permissive            as libcairo-gobject2 (same file)
+libcairo2                       408fb9e704e875cd42d432e7c9b3b378f568e3c89db2b5c5ef3d11c025319574  LGPL,MPL,permissive            as libcairo-gobject2 (same file)
+libgcrypt20                     40162167dff80843a4b24aa8d0a4ffc50be5338d004ebe38f86ae3397ba9de3e  LGPL,GPL,permissive,public-domain  library LGPL-2.1+; tools and docs GPL-2+; some files MIT/BSD-style or public domain
+libgnutls30t64                  51da5214308b87d6a0a2fbcaea1f7dbd15510be733e5921d9548ff6b88d84dd8  LGPL,GPL,permissive            library LGPL-2.1+; tools GPL-3+; some files MIT/BSD-style
+libgssapi-krb5-2                936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816  permissive,GPL                 MIT Kerberos: MIT/BSD-style; some files "BSD or GPL-2+" at the recipient's choice
+libk5crypto3                    936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816  permissive,GPL                 as libgssapi-krb5-2 (same file)
+libkrb5-3                       936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816  permissive,GPL                 as libgssapi-krb5-2 (same file)
+libkrb5support0                 936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816  permissive,GPL                 as libgssapi-krb5-2 (same file)
+libpixman-1-0                   1b3fb5690861e15ca4fd6640fd4def4b2576617942eec04b6fcb7d8bc6c4c9da  permissive                     MIT ("Permission is hereby granted, free of charge"); no copyleft
+librtmp1                        4302abcc1ea1b6cbe8d19c79b892acf78878030220210707c19006828866207c  LGPL,GPL                       librtmp LGPL-2.1+; the rtmpdump programs GPL-2+
+libtasn1-6                      572ad60ad184d8f52c6dc66d83a61a68f137db560b3452ce00588c9ecf128a65  LGPL,GPL                       library LGPL-2.1+; tools GPL-3+
+libwayland-egl1                 736bf54141fa9808939ffff2691b817888ea53197484c2099e8d03b954b83e3b  permissive                     X11 / MIT; no copyleft
+libxcb-render0                  4f7cb9db6bf6542f5417e3d674c780d3a5fd12291a54d63054fb576ee0cfae80  permissive                     MIT ("Permission is hereby granted, free of charge"); no copyleft
+libxcb-shm0                     4f7cb9db6bf6542f5417e3d674c780d3a5fd12291a54d63054fb576ee0cfae80  permissive                     as libxcb-render0 (same file)
+libxcursor1                     817abc0ccc9e2591057be256b0f6d80edb134221ced29dd545a9eafaf40b423c  permissive                     X11-style ("Permission to use, copy, modify ..."); no copyleft
+libxdamage1                     09182bc7805ff77a41251e450cebd0d33c48a74ba8ec4b734855a22c86f50417  permissive                     X11-style; no copyleft
+libxext6                        bc57e445ca1d9fe082c8d54189dd411ff26caa8552c9c63d44ea06a982f32124  permissive                     MIT / X11-style; no copyleft
+libxfixes3                      051ffe073ab38244c504bb379903b4ecda6081fb3d97d0d3dce44bc11712eef2  permissive                     MIT / X11-style; no copyleft
+libxi6                          c812f9c54513ae593aab9580b54a4b18219648df7068d49ca1daa47f522ba3fa  permissive                     MIT / X11-style; no copyleft
+libxinerama1                    e49d9732f261b3ffcb50c40914bd9d144de5557dad9b2ae20dbe8e3c5b3d17fb  permissive                     MIT / X11-style; no copyleft
+libxkbcommon0                   5eeaeb1b6e029a0274e1573765bb0bae2926ef96a3679203faa4fd00fdaeaa88  permissive                     MIT ("Permission is hereby granted, free of charge"); no copyleft
+libxrandr2                      6d8e6239cfe9dd25bbeef06dcf0610d802ebbdc8968db87cf5adf00ff98927d4  permissive                     X11-style; no copyleft
+libxrender1                     ed2a78123a5076b4f11da38cb1ffb85b5cb9fdc26b5746c517b1d7e7a9029704  permissive                     X11-style; no copyleft
