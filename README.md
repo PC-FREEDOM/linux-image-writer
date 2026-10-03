@@ -10,8 +10,8 @@ A simple USB image writer for Linux, designed with safety in mind.
 
 ## Status
 
-Linux Image Writer v0.1.0 is the first public release.
-No official packages are published yet.
+Linux Image Writer v0.1.1 is the current release.
+An official x86_64 AppImage is available from the GitHub Releases page.
 
 ## Features
 
@@ -48,8 +48,11 @@ The GUI is available in English and Japanese.
 
 ## Installation
 
-No official packages are published yet.
-A production Flatpak manifest is available for development builds; see
+An official x86_64 AppImage is available from the GitHub Releases page.
+See [AppImage installation and verification](docs/AppImage.md) for download,
+checksum verification, requirements and troubleshooting.
+
+A production Flatpak manifest is also available for development builds; see
 [Building from source](#building-from-source) for building the app itself.
 
 ## Usage

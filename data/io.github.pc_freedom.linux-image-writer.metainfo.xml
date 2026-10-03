@@ -75,6 +75,20 @@
   </screenshots>
 
   <releases>
+    <release version="0.1.1" date="2026-10-03">
+      <description>
+        <p>Compatibility and packaging update for Linux Image Writer.</p>
+        <p xml:lang="ja">Linux Image Writer の互換性と配布方法を改善するアップデートです。</p>
+        <ul>
+          <li>Improves visual compatibility with GTK 4.14 and newer versions</li>
+          <li xml:lang="ja">GTK 4.14 以降での表示互換性を改善しました</li>
+          <li>Adds a reproducible AppImage distribution with verified dependencies and source archives</li>
+          <li xml:lang="ja">依存関係とソースアーカイブを検証できる、再現可能な AppImage 配布に対応しました</li>
+          <li>Adds third-party license notices for distributed dependencies</li>
+          <li xml:lang="ja">配布する依存関係の第三者ライセンス表示を追加しました</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-02">
       <description>
         <p>First release of Linux Image Writer, a GTK 4 and libadwaita app for writing disk images to USB drives on Linux.</p>
