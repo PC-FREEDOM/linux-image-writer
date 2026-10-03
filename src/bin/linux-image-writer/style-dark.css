@@ -1,10 +1,12 @@
 /* Linux Image Writer -- the dark charcoal/slate palette, applied on top of
- * style.css while libadwaita's style is dark (see main.rs). */
+ * style.css while libadwaita's style is dark (see main.rs). Named colours,
+ * like style.css, so GTK 4.14 / libadwaita 1.5 understand it too. */
 
-:root {
-  --window-bg-color: #1e2125;
-  --headerbar-bg-color: #262a2f;
-  --view-bg-color: #191c1f;
-  --dialog-bg-color: #2c3136;
-  --popover-bg-color: #2c3136;
-}
+@define-color window_bg_color #1e2125;
+@define-color headerbar_bg_color #262a2f;
+@define-color view_bg_color #191c1f;
+@define-color dialog_bg_color #2c3136;
+@define-color popover_bg_color #2c3136;
+/* The standalone accent on the dark palette: the yellow itself (what
+ * libadwaita 1.6 and later derive; 1.5 needs it set). */
+@define-color accent_color #ffcc00;

@@ -1,44 +1,50 @@
 /* Linux Image Writer -- visual polish.
  *
- * Built on libadwaita's own variables, so light, dark and high contrast
+ * Built on libadwaita's own named colours, so light, dark and high contrast
  * keep working: only the accent, a slightly cooler (slate) neutral palette
  * and a few app-specific classes (all prefixed `liw-`) are set here. Every
- * state shown in colour is also shown in words and icons by the code. */
+ * state shown in colour is also shown in words and icons by the code.
+ *
+ * Written for GTK 4.14 / libadwaita 1.5 and every later version alike:
+ * colours are set with `@define-color` and derived with `alpha()`, which all
+ * of them understand, not with CSS custom properties, `var()` or
+ * `color-mix()` (GTK 4.16 and later only). One stylesheet serves every build,
+ * whatever GTK it runs on. */
 
 /* PC-FREEDOM yellow as the accent: the primary action, the selected
- * choice, focus rings, progress and the active step. Text on it is dark;
- * libadwaita derives the readable standalone `--accent-color` from it
- * (darker amber in light mode, yellow in dark mode). */
-:root {
-  --accent-bg-color: #ffcc00;
-  --accent-fg-color: rgb(0 0 6 / 87%);
-  --liw-line: color-mix(in srgb, currentColor 14%, transparent);
-  --liw-radius: 8px;
-}
+ * choice, focus rings, progress and the active step. Text on it is dark. */
+@define-color accent_bg_color #ffcc00;
+@define-color accent_fg_color rgba(0, 0, 6, 0.87);
+/* The standalone accent, for accent-coloured text, progress and the active
+ * step: readable on the window background, so a darker amber here (yellow in
+ * the dark palette, style-dark.css). libadwaita 1.6 and later derive exactly
+ * these from accent_bg_color; 1.5 does not, so they are set. */
+@define-color accent_color #895900;
 
 /* A cooler, charcoal/slate neutral palette, as light as libadwaita's own
  * (text contrast is unchanged; high contrast adds its own borders on top).
  * The dark palette is style-dark.css, applied while the style is dark. */
-:root {
-  --window-bg-color: #f3f4f6;
-  --headerbar-bg-color: #e9ecef;
-  --view-bg-color: #ffffff;
-}
+@define-color window_bg_color #f3f4f6;
+@define-color headerbar_bg_color #e9ecef;
+@define-color view_bg_color #ffffff;
+
+/* Throughout: corners of 8px, and thin outlines in the text colour at 14%
+ * (`alpha(currentColor, 0.14)`). */
 
 /* ---- Lists: less rounded, no drop shadow, a thin outline ---- */
 
 .liw-sections list.boxed-list,
 .liw-op list.boxed-list {
-  border-radius: var(--liw-radius);
-  box-shadow: 0 0 0 1px var(--liw-line);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px alpha(currentColor, 0.14);
 }
 
 .liw-sections list.boxed-list > row:first-child,
 .liw-sections list.boxed-list > row:first-child.expander row.header,
 .liw-op list.boxed-list > row:first-child,
 .liw-op list.boxed-list > row:first-child.expander row.header {
-  border-top-left-radius: var(--liw-radius);
-  border-top-right-radius: var(--liw-radius);
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
 }
 
 .liw-sections list.boxed-list > row:last-child,
@@ -49,14 +55,14 @@
 .liw-op list.boxed-list > row:last-child.expander:not(:checked),
 .liw-op list.boxed-list > row:last-child.expander:not(:checked) row.header,
 .liw-op list.boxed-list > row:last-child.expander:checked list.nested {
-  border-bottom-left-radius: var(--liw-radius);
-  border-bottom-right-radius: var(--liw-radius);
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
 }
 
 /* ---- Section titles: a quieter, instrument-like label ---- */
 
 .liw-sections preferencesgroup > box > box.header {
-  border-bottom: 1px solid var(--liw-line);
+  border-bottom: 1px solid alpha(currentColor, 0.14);
   padding-bottom: 4px;
 }
 
@@ -68,22 +74,22 @@
 /* The Verify choices sit in the same kind of outlined panel as the lists. */
 .liw-options-panel {
   padding: 10px 12px;
-  border-radius: var(--liw-radius);
-  background-color: var(--card-bg-color);
-  box-shadow: 0 0 0 1px var(--liw-line);
+  border-radius: 8px;
+  background-color: @card_bg_color;
+  box-shadow: 0 0 0 1px alpha(currentColor, 0.14);
 }
 
 /* ---- The always-shown warning: a quiet panel, not an alarm ---- */
 
 .liw-warning {
   padding: 7px 14px;
-  border-radius: var(--liw-radius);
-  background-color: color-mix(in srgb, var(--warning-bg-color) 10%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning-color) 40%, transparent);
+  border-radius: 8px;
+  background-color: alpha(@warning_bg_color, 0.1);
+  box-shadow: inset 0 0 0 1px alpha(@warning_color, 0.4);
 }
 
 .liw-warning > image {
-  color: var(--warning-color);
+  color: @warning_color;
 }
 
 /* ---- Buttons: moderate corners instead of pills ---- */
@@ -91,17 +97,17 @@
 button.liw-primary {
   min-height: 24px;
   padding: 10px 28px;
-  border-radius: var(--liw-radius);
+  border-radius: 8px;
 }
 
 button.liw-action {
   padding: 8px 18px;
-  border-radius: var(--liw-radius);
+  border-radius: 8px;
 }
 
 /* Not yet possible is neutral grey, never a faded yellow or an error. */
 button.liw-primary.suggested-action:disabled {
-  background-color: color-mix(in srgb, currentColor 10%, transparent);
+  background-color: alpha(currentColor, 0.1);
   color: inherit;
 }
 
@@ -114,42 +120,43 @@ button.liw-primary.suggested-action:disabled {
 }
 
 .liw-phase.liw-phase-active {
-  background-color: color-mix(in srgb, var(--accent-bg-color) 12%, transparent);
-  box-shadow: inset 0 -2px 0 var(--accent-color);
+  background-color: alpha(@accent_bg_color, 0.12);
+  box-shadow: inset 0 -2px 0 @accent_color;
 }
 
 .liw-phase.liw-phase-active > box > image {
-  color: var(--accent-color);
+  color: @accent_color;
 }
 
 .liw-phase.liw-phase-done {
-  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--success-color) 55%, transparent);
+  box-shadow: inset 0 -2px 0 alpha(@success_color, 0.55);
 }
 
 .liw-phase.liw-phase-done > box > image {
-  color: var(--success-color);
+  color: @success_color;
 }
 
 .liw-phase.liw-phase-failed {
-  box-shadow: inset 0 -2px 0 var(--error-color);
+  box-shadow: inset 0 -2px 0 @error_color;
 }
 
 .liw-phase.liw-phase-failed > box > image,
 .liw-phase.liw-phase-failed > label {
-  color: var(--error-color);
+  color: @error_color;
 }
 
 .liw-phase.liw-phase-cancelled {
-  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--warning-color) 60%, transparent);
+  box-shadow: inset 0 -2px 0 alpha(@warning_color, 0.6);
 }
 
 .liw-phase.liw-phase-cancelled > box > image {
-  color: var(--warning-color);
+  color: @warning_color;
 }
 
-/* Still to come, not requested or not run: low emphasis. */
+/* Still to come, not requested or not run: low emphasis, at libadwaita's
+ * dimmed opacity (that of .dim-label). */
 .liw-phase.liw-phase-idle > box {
-  opacity: var(--dim-opacity);
+  opacity: 0.55;
 }
 
 /* ---- Progress: slimmer, in the accent ---- */
@@ -162,7 +169,7 @@ progressbar.liw-progress > trough {
 progressbar.liw-progress > trough > progress {
   min-height: 6px;
   border-radius: 3px;
-  background-color: var(--accent-color);
+  background-color: @accent_color;
 }
 
 progressbar.liw-progress > text {
@@ -182,6 +189,6 @@ progressbar.liw-progress > text {
 
 /* Safe Removal: the one status that says the drive can be removed. */
 row.liw-removed label.title {
-  color: var(--success-color);
+  color: @success_color;
   font-weight: bold;
 }
