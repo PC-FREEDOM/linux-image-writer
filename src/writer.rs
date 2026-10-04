@@ -12,10 +12,77 @@
 // wrap or implement `Read`/`Write`, not conform to a writer-specific trait.
 
 use std::io::{self, Read, Write};
+use std::num::NonZeroU64;
 
 // 1 MiB. Chosen as a reasonable default for chunked copying; not tuned for
 // throughput (performance is explicitly out of scope for this PoC).
 pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+
+// The write-back window: how far accepted bytes may run ahead of the bytes
+// confirmed as written back before the write loop waits for the oldest of
+// them (see `write_with_writeback`). It bounds the data still pending when
+// the write ends (the final sync) or is cancelled (the drain), and so how
+// long either can take: roughly this amount divided by the device's write
+// speed. 64 MiB is a starting point to compare against 32 and 128 MiB on
+// real devices, not a measured optimum. The one place it is defined.
+pub const DEFAULT_WRITEBACK_WINDOW_BYTES: NonZeroU64 = NonZeroU64::new(64 * 1024 * 1024).unwrap();
+
+// Why a write-back request on the target failed. `Unsupported` means the
+// request itself is not available for this target (the target says so, e.g.
+// the syscall does not exist or the file type does not take it); the write
+// loop then falls back to a whole-file data sync. `Failed` is everything
+// else, a real failure of the write-back (an I/O error, the device gone):
+// it ends the write, it is never taken as "unsupported".
+#[derive(Debug)]
+pub enum WritebackError {
+    // The error is kept for `Debug` output only: the loop acts on the
+    // variant, not on the error.
+    #[allow(dead_code)]
+    Unsupported(io::Error),
+    Failed(io::Error),
+}
+
+// Write-back control a write target may offer, for `write_with_writeback`.
+// Offsets are from the start of the target (= the start of the image).
+// The Linux block device implementation lives in `linux_access.rs`; this
+// module stays platform-agnostic.
+pub trait Writeback {
+    // Starts write-back of `[offset, offset + len)` without waiting for it.
+    fn start_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError>;
+
+    // Waits until `[offset, offset + len)` is written back, starting
+    // write-back for any part of it not yet started. Returns `Ok` only once
+    // the whole range was written back.
+    fn wait_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError>;
+
+    // Writes back and waits for every byte written so far (`fdatasync`):
+    // the fallback when ranged write-back is unsupported.
+    fn sync_data(&mut self) -> io::Result<()>;
+}
+
+// A borrowed target offers what the target offers (as `&mut W: Write`).
+impl<T: Writeback + ?Sized> Writeback for &mut T {
+    fn start_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError> {
+        (**self).start_writeback(offset, len)
+    }
+
+    fn wait_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError> {
+        (**self).wait_writeback(offset, len)
+    }
+
+    fn sync_data(&mut self) -> io::Result<()> {
+        (**self).sync_data()
+    }
+}
+
+// One progress report from `write_with_writeback`, in the order it happens:
+// a chunk accepted, and -- only after a write-back wait or sync succeeded --
+// the new end of the written-back range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteLoopProgress {
+    Accepted(WriteProgress),
+    WrittenBack(WritebackProgress),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WritePlan {
@@ -58,7 +125,7 @@ impl WritePlan {
 // derived from this one.
 /// Bytes accepted by the kernel so far (`write()` returned success); not
 /// necessarily written back to the device yet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteProgress {
     pub bytes_written: u64,
     pub total_bytes: u64,
@@ -73,10 +140,12 @@ pub struct WriteProgress {
 // whether the device's own volatile cache was flushed is the final
 // `fsync()`'s business, not this value's.
 //
-// Produced today at the two points where a sync confirms everything
-// accepted so far: the final `fsync()` (`SyncSucceeded`) and a cancelled
-// write's `fdatasync()` (`CancelSynced`). A ranged write-back inside the
-// write loop (`sync_file_range`) would produce more of the same value.
+// Produced at three points, each a successful sync: inside the write loop
+// when a write-back wait (or the fallback data sync) for the oldest part of
+// the window succeeded (`write_with_writeback`); after the final `fsync()`
+// (`SyncSucceeded`), which confirms the total; and after a cancelled
+// write's `fdatasync()` (`CancelSynced`), which confirms everything
+// accepted.
 /// Bytes confirmed as written back to the device by an explicit sync, from
 /// the start of the image. Never derived from accepted bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,11 +169,23 @@ pub enum WriteError {
     // The source ran out of data before `plan.image_size` bytes were read —
     // distinct from `SourceRead`, which is for an actual I/O error. This is
     // never treated as a successful, if-shorter-than-planned write.
-    SourceTooShort { bytes_written: u64 },
+    SourceTooShort {
+        bytes_written: u64,
+    },
     // Carries how much had already been written when cancellation was
     // observed, so the caller always knows the target is left partially
     // written rather than having to guess.
-    Cancelled { bytes_written: u64 },
+    Cancelled {
+        bytes_written: u64,
+    },
+    // Starting or waiting for write-back (or the fallback data sync) failed
+    // after `bytes_written` bytes were accepted: what reached the device is
+    // unknown. Never produced for an `Unsupported` write-back request --
+    // that switches to the fallback instead.
+    Writeback {
+        bytes_written: u64,
+        error: io::Error,
+    },
 }
 
 // Reads until `buf` is full or the source is exhausted, retrying on
@@ -132,14 +213,80 @@ fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
 // uncancelled completion — but flushing here only means
 // `std::io::Write::flush()` (pushing the writer's own buffers out), which is
 // a different guarantee from an OS-level sync/fsync of a block device to
-// physical media. A future block-device Writer must add its own explicit
-// sync step; this function does not perform (or claim to perform) one, since
-// today it is only ever used against plain files in tests/PoC code.
+// physical media. No write-back is requested here: see
+// `write_with_writeback` for the variant the device write uses. Used by the
+// development binary's PoC commands and by tests, not by the library's own
+// write path any more.
+#[allow(dead_code)]
 pub fn write<R: Read, W: Write>(
+    plan: &WritePlan,
+    source: R,
+    target: W,
+    mut on_progress: impl FnMut(WriteProgress),
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<u64, WriteError> {
+    write_inner(
+        plan,
+        source,
+        NoWriteback(target),
+        None,
+        |progress| {
+            if let WriteLoopProgress::Accepted(progress) = progress {
+                on_progress(progress)
+            }
+        },
+        is_cancelled,
+    )
+}
+
+// `write`, bounding how far accepted bytes run ahead of written-back ones.
+// After each chunk is written:
+//
+//   1. accepted progress is reported (`WriteLoopProgress::Accepted`);
+//   2. write-back of that chunk is started (`start_writeback`);
+//   3. if more than `window` bytes are accepted but not yet confirmed, the
+//      loop waits (`wait_writeback`) for the oldest of them, from the end of
+//      the confirmed range up to `accepted - window`;
+//   4. once that wait succeeded, the new end of the confirmed range is
+//      reported (`WriteLoopProgress::WrittenBack`).
+//
+// So after every chunk, `accepted - written back <= window` (between steps
+// 1 and 3 it can reach `window + chunk`), the written-back value only grows,
+// is reported only when it grows, and never passes the accepted value. The
+// last `window` bytes or less are left to the caller's final sync (or a
+// cancelled write's drain), which confirms them; this loop never reports
+// the total by itself unless the image fits in what it already waited for.
+//
+// Fallback: if the target answers a ranged request with
+// `WritebackError::Unsupported`, the loop switches, for the rest of the
+// write, to `sync_data()` whenever the window is exceeded -- a whole-file
+// data sync that confirms everything accepted so far. A
+// `WritebackError::Failed`, or a failed `sync_data()`, ends the write with
+// `WriteError::Writeback`; no written-back progress is reported for it.
+pub fn write_with_writeback<R: Read, W: Write + Writeback>(
+    plan: &WritePlan,
+    source: R,
+    target: W,
+    window: NonZeroU64,
+    on_progress: impl FnMut(WriteLoopProgress),
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<u64, WriteError> {
+    write_inner(
+        plan,
+        source,
+        target,
+        Some(window),
+        on_progress,
+        is_cancelled,
+    )
+}
+
+fn write_inner<R: Read, W: Write + Writeback>(
     plan: &WritePlan,
     mut source: R,
     mut target: W,
-    mut on_progress: impl FnMut(WriteProgress),
+    window: Option<NonZeroU64>,
+    mut on_progress: impl FnMut(WriteLoopProgress),
     mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<u64, WriteError> {
     // Defense in depth: even if a `WritePlan` were constructed some other
@@ -155,6 +302,7 @@ pub fn write<R: Read, W: Write>(
 
     let mut buffer = vec![0u8; plan.chunk_size];
     let mut bytes_written: u64 = 0;
+    let mut writeback = window.map(WritebackWindow::new);
 
     while bytes_written < plan.image_size {
         if is_cancelled() {
@@ -183,17 +331,133 @@ pub fn write<R: Read, W: Write>(
             .write_all(&buffer[..read_bytes])
             .map_err(WriteError::TargetWrite)?;
 
+        let chunk_start = bytes_written;
         bytes_written += read_bytes as u64;
 
-        on_progress(WriteProgress {
+        on_progress(WriteLoopProgress::Accepted(WriteProgress {
             bytes_written,
             total_bytes: plan.image_size,
-        });
+        }));
+
+        if let Some(writeback) = writeback.as_mut()
+            && let Some(completed_bytes) =
+                writeback.after_chunk(&mut target, chunk_start, bytes_written)?
+        {
+            on_progress(WriteLoopProgress::WrittenBack(WritebackProgress {
+                completed_bytes,
+                total_bytes: plan.image_size,
+            }));
+        }
     }
 
     target.flush().map_err(WriteError::FlushFailed)?;
 
     Ok(bytes_written)
+}
+
+// How the write loop confirms write-back: ranged requests, or -- once the
+// target said they are unsupported -- whole-file data syncs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritebackMode {
+    Ranged,
+    DataSync,
+}
+
+// The write loop's write-back bookkeeping: the window, the mode, and the
+// end of the range confirmed so far (`completed`, from the start of the
+// image; only ever set from a successful wait or sync).
+struct WritebackWindow {
+    window: u64,
+    mode: WritebackMode,
+    completed: u64,
+}
+
+impl WritebackWindow {
+    fn new(window: NonZeroU64) -> Self {
+        WritebackWindow {
+            window: window.get(),
+            mode: WritebackMode::Ranged,
+            completed: 0,
+        }
+    }
+
+    // After the chunk `[chunk_start, accepted)` was written: starts its
+    // write-back, and if the window is exceeded, waits until it is not.
+    // Returns the new end of the confirmed range when it moved.
+    fn after_chunk<W: Writeback>(
+        &mut self,
+        target: &mut W,
+        chunk_start: u64,
+        accepted: u64,
+    ) -> Result<Option<u64>, WriteError> {
+        let failed = |error| WriteError::Writeback {
+            bytes_written: accepted,
+            error,
+        };
+
+        if self.mode == WritebackMode::Ranged {
+            match target.start_writeback(chunk_start, accepted - chunk_start) {
+                Ok(()) => {}
+                Err(WritebackError::Unsupported(_)) => self.mode = WritebackMode::DataSync,
+                Err(WritebackError::Failed(error)) => return Err(failed(error)),
+            }
+        }
+
+        if accepted - self.completed <= self.window {
+            return Ok(None);
+        }
+
+        let completed = match self.mode {
+            WritebackMode::Ranged => {
+                let until = accepted - self.window;
+                match target.wait_writeback(self.completed, until - self.completed) {
+                    Ok(()) => until,
+                    Err(WritebackError::Unsupported(_)) => {
+                        self.mode = WritebackMode::DataSync;
+                        target.sync_data().map_err(failed)?;
+                        accepted
+                    }
+                    Err(WritebackError::Failed(error)) => return Err(failed(error)),
+                }
+            }
+            WritebackMode::DataSync => {
+                target.sync_data().map_err(failed)?;
+                accepted
+            }
+        };
+
+        self.completed = completed;
+        Ok(Some(completed))
+    }
+}
+
+// Adapts a plain `Write` target to `write_inner` for `write`, which never
+// requests write-back (it passes no window), so these are never called.
+#[allow(dead_code)] // only `write` builds it; see there
+struct NoWriteback<W>(W);
+
+impl<W: Write> Write for NoWriteback<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<W> Writeback for NoWriteback<W> {
+    fn start_writeback(&mut self, _offset: u64, _len: u64) -> Result<(), WritebackError> {
+        Ok(())
+    }
+
+    fn wait_writeback(&mut self, _offset: u64, _len: u64) -> Result<(), WritebackError> {
+        Ok(())
+    }
+
+    fn sync_data(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 // Minimal verification primitive: compares two readers byte-for-byte.
@@ -504,5 +768,439 @@ mod tests {
         assert_eq!(written, 4096);
         assert_eq!(target.len(), 4096);
         assert_eq!(target, full_data[..4096]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Write-back window (`write_with_writeback`), against a fake target that
+    // records every write-back request in one log together with the
+    // progress reports, so their order can be checked.
+    // ---------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Logged {
+        Start(u64, u64),
+        Wait(u64, u64),
+        SyncData,
+        Progress(WriteLoopProgress),
+    }
+
+    // How the fake answers write-back requests.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        Ok,
+        Unsupported,
+        Fail,
+    }
+
+    struct FakeTarget {
+        data: Vec<u8>,
+        log: std::rc::Rc<std::cell::RefCell<Vec<Logged>>>,
+        start: Answer,
+        wait: Answer,
+        sync_fails: bool,
+    }
+
+    impl FakeTarget {
+        fn new(log: &std::rc::Rc<std::cell::RefCell<Vec<Logged>>>) -> Self {
+            FakeTarget {
+                data: Vec::new(),
+                log: log.clone(),
+                start: Answer::Ok,
+                wait: Answer::Ok,
+                sync_fails: false,
+            }
+        }
+
+        fn answer(answer: Answer, what: &str) -> Result<(), WritebackError> {
+            match answer {
+                Answer::Ok => Ok(()),
+                Answer::Unsupported => Err(WritebackError::Unsupported(io::Error::other(format!(
+                    "{what} unsupported"
+                )))),
+                Answer::Fail => Err(WritebackError::Failed(io::Error::other(format!(
+                    "{what} failed"
+                )))),
+            }
+        }
+    }
+
+    impl Write for FakeTarget {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.data.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Writeback for FakeTarget {
+        fn start_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError> {
+            self.log.borrow_mut().push(Logged::Start(offset, len));
+            Self::answer(self.start, "start")
+        }
+
+        fn wait_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError> {
+            self.log.borrow_mut().push(Logged::Wait(offset, len));
+            Self::answer(self.wait, "wait")
+        }
+
+        fn sync_data(&mut self) -> io::Result<()> {
+            self.log.borrow_mut().push(Logged::SyncData);
+            if self.sync_fails {
+                Err(io::Error::other("sync failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn window(bytes: u64) -> NonZeroU64 {
+        NonZeroU64::new(bytes).unwrap()
+    }
+
+    // Runs `write_with_writeback` over a fake target set up by `setup`;
+    // returns the result, the log, and the target's bytes.
+    fn run_windowed(
+        image_size: u64,
+        chunk_size: usize,
+        window_bytes: u64,
+        setup: impl FnOnce(&mut FakeTarget),
+        cancel_after_chunks: Option<usize>,
+    ) -> (Result<u64, WriteError>, Vec<Logged>, Vec<u8>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut target = FakeTarget::new(&log);
+        setup(&mut target);
+        let plan = WritePlan::new(image_size, image_size, chunk_size).unwrap();
+        let source: Vec<u8> = (0..image_size).map(|i| (i % 251) as u8).collect();
+        let result = write_with_writeback(
+            &plan,
+            Cursor::new(source),
+            &mut target,
+            window(window_bytes),
+            |progress| log.borrow_mut().push(Logged::Progress(progress)),
+            // Cancelled once `cancel_after_chunks` chunks were accepted.
+            || {
+                cancel_after_chunks.is_some_and(|limit| {
+                    log.borrow()
+                        .iter()
+                        .filter(|entry| {
+                            matches!(entry, Logged::Progress(WriteLoopProgress::Accepted(_)))
+                        })
+                        .count()
+                        >= limit
+                })
+            },
+        );
+        let log = log.borrow().clone();
+        (result, log, target.data)
+    }
+
+    fn written_back(log: &[Logged]) -> Vec<u64> {
+        log.iter()
+            .filter_map(|entry| match entry {
+                Logged::Progress(WriteLoopProgress::WrittenBack(p)) => Some(p.completed_bytes),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Checks the invariants over the whole progress sequence:
+    // completed <= accepted <= total; written-back strictly increasing (no
+    // duplicates); and after each chunk's write-back handling -- i.e. at
+    // every following accepted report -- accepted - completed <= window.
+    fn assert_window_invariants(log: &[Logged], total: u64, window_bytes: u64) {
+        let mut accepted = 0u64;
+        let mut completed = 0u64;
+        for entry in log {
+            match entry {
+                Logged::Progress(WriteLoopProgress::Accepted(p)) => {
+                    assert!(
+                        accepted - completed <= window_bytes,
+                        "backlog {} over window {window_bytes} after a chunk",
+                        accepted - completed
+                    );
+                    assert!(p.bytes_written > accepted);
+                    assert_eq!(p.total_bytes, total);
+                    accepted = p.bytes_written;
+                }
+                Logged::Progress(WriteLoopProgress::WrittenBack(p)) => {
+                    assert!(p.completed_bytes > completed, "not strictly increasing");
+                    assert!(p.completed_bytes <= accepted, "written back past accepted");
+                    assert_eq!(p.total_bytes, total);
+                    completed = p.completed_bytes;
+                }
+                _ => {}
+            }
+            assert!(completed <= accepted && accepted <= total);
+        }
+        assert!(accepted - completed <= window_bytes);
+    }
+
+    // W1-W5. Over several windows with a tail: the backlog never stays over
+    // the window, written-back progress only follows a successful wait
+    // whose range ends exactly there, it increases strictly, and it never
+    // passes the accepted value or the total. The last window is left to
+    // the final sync: the loop's last written-back value is total - window.
+    #[test]
+    fn writeback_window_bounds_the_backlog_and_reports_only_after_waits() {
+        let (total, chunk, window_bytes) = (5 * 4096 + 300, 1024usize, 4096u64);
+        let (result, log, data) = run_windowed(total, chunk, window_bytes, |_| {}, None);
+
+        assert_eq!(result.unwrap(), total);
+        assert_eq!(data.len() as u64, total);
+        assert_window_invariants(&log, total, window_bytes);
+
+        for (index, entry) in log.iter().enumerate() {
+            if let Logged::Progress(WriteLoopProgress::WrittenBack(p)) = entry {
+                match &log[index - 1] {
+                    Logged::Wait(offset, len) => assert_eq!(offset + len, p.completed_bytes),
+                    other => panic!("written-back progress not right after a wait: {other:?}"),
+                }
+            }
+        }
+        // Every chunk's write-back is started, right after it is accepted.
+        let starts = log
+            .iter()
+            .filter(|entry| matches!(entry, Logged::Start(..)))
+            .count();
+        assert_eq!(starts, (total as usize).div_ceil(chunk));
+        // Waits cover the image from 0 without gaps or overlaps.
+        let mut next = 0;
+        for entry in &log {
+            if let Logged::Wait(offset, len) = entry {
+                assert_eq!(*offset, next);
+                next = offset + len;
+            }
+        }
+        assert_eq!(written_back(&log).last(), Some(&(total - window_bytes)));
+    }
+
+    // W2/W6. Exactly one window: nothing is waited for or reported as
+    // written back -- the final sync confirms it.
+    #[test]
+    fn exactly_one_window_waits_for_nothing() {
+        let (result, log, _) = run_windowed(4096, 1024, 4096, |_| {}, None);
+        assert_eq!(result.unwrap(), 4096);
+        assert!(!log.iter().any(|entry| matches!(entry, Logged::Wait(..))));
+        assert!(written_back(&log).is_empty());
+    }
+
+    // W6. One byte over the window: the first byte is waited for and
+    // reported, nothing more.
+    #[test]
+    fn one_byte_over_the_window_waits_for_that_byte() {
+        let (result, log, _) = run_windowed(4097, 1024, 4096, |_| {}, None);
+        assert_eq!(result.unwrap(), 4097);
+        assert_eq!(
+            log.iter()
+                .filter(|entry| matches!(entry, Logged::Wait(..)))
+                .collect::<Vec<_>>(),
+            [&Logged::Wait(0, 1)]
+        );
+        assert_eq!(written_back(&log), [1]);
+        assert_window_invariants(&log, 4097, 4096);
+    }
+
+    // W6. Chunks that do not divide the window, and a window smaller than a
+    // chunk: the invariants still hold.
+    #[test]
+    fn uneven_chunks_and_small_windows_keep_the_invariants() {
+        for (total, chunk, window_bytes) in [
+            (10_000u64, 1000usize, 2500u64),
+            (10_000, 3000, 1000),
+            (7777, 1024, 1),
+            (65_537, 4096, 16_384),
+        ] {
+            let (result, log, data) = run_windowed(total, chunk, window_bytes, |_| {}, None);
+            assert_eq!(result.unwrap(), total);
+            assert_eq!(data.len() as u64, total);
+            assert_window_invariants(&log, total, window_bytes);
+            assert_eq!(
+                written_back(&log).last().copied().unwrap_or(0),
+                total.saturating_sub(window_bytes),
+                "{total}/{chunk}/{window_bytes}"
+            );
+        }
+    }
+
+    // W7. Images smaller than the window, or than one chunk: written as
+    // before, nothing waited for. A zero-size image is still refused.
+    #[test]
+    fn small_images_wait_for_nothing_and_zero_is_still_refused() {
+        for (total, chunk) in [(100u64, 1024usize), (3000, 1024)] {
+            let (result, log, data) = run_windowed(total, chunk, 4096, |_| {}, None);
+            assert_eq!(result.unwrap(), total);
+            assert_eq!(data.len() as u64, total);
+            assert!(written_back(&log).is_empty());
+        }
+
+        let plan = WritePlan {
+            image_size: 0,
+            target_size: 10,
+            chunk_size: 1024,
+        };
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let result = write_with_writeback(
+            &plan,
+            Cursor::new(Vec::new()),
+            FakeTarget::new(&log),
+            window(4096),
+            |_| {},
+            || false,
+        );
+        assert!(matches!(result, Err(WriteError::InvalidSize)));
+    }
+
+    // W8. A cancellation stops new writes with the backlog within the
+    // window; the written-back value stays where the last wait put it.
+    #[test]
+    fn cancellation_leaves_at_most_one_window_pending() {
+        let (result, log, _) = run_windowed(64 * 1024, 1024, 4096, |_| {}, Some(20));
+        let accepted = match result {
+            Err(WriteError::Cancelled { bytes_written }) => bytes_written,
+            other => panic!("expected Cancelled, got {other:?}"),
+        };
+        let completed = written_back(&log).last().copied().unwrap_or(0);
+        assert!(accepted > 4096);
+        assert!(accepted - completed <= 4096);
+        assert_window_invariants(&log, 64 * 1024, 4096);
+    }
+
+    // W10. A failed start or wait ends the write with `Writeback` and no
+    // written-back progress for it.
+    #[test]
+    fn a_failed_start_or_wait_is_a_writeback_error() {
+        let (result, log, _) = run_windowed(
+            10_000,
+            1000,
+            2000,
+            |target| target.start = Answer::Fail,
+            None,
+        );
+        match result {
+            Err(WriteError::Writeback {
+                bytes_written,
+                error,
+            }) => {
+                assert_eq!(bytes_written, 1000);
+                assert_eq!(error.to_string(), "start failed");
+            }
+            other => panic!("expected Writeback, got {other:?}"),
+        }
+        assert!(written_back(&log).is_empty());
+
+        let (result, log, _) = run_windowed(
+            10_000,
+            1000,
+            2000,
+            |target| target.wait = Answer::Fail,
+            None,
+        );
+        match result {
+            Err(WriteError::Writeback {
+                bytes_written,
+                error,
+            }) => {
+                assert_eq!(bytes_written, 3000);
+                assert_eq!(error.to_string(), "wait failed");
+            }
+            other => panic!("expected Writeback, got {other:?}"),
+        }
+        assert!(written_back(&log).is_empty());
+        assert!(!log.iter().any(|entry| matches!(entry, Logged::SyncData)));
+    }
+
+    // W10 fallback. Ranged write-back unsupported (on start): the loop
+    // switches to a data sync each time the window is exceeded, reporting
+    // everything accepted as written back; ranged requests stop.
+    #[test]
+    fn unsupported_start_falls_back_to_data_sync() {
+        let (result, log, data) = run_windowed(
+            10_000,
+            1000,
+            2500,
+            |target| target.start = Answer::Unsupported,
+            None,
+        );
+        assert_eq!(result.unwrap(), 10_000);
+        assert_eq!(data.len(), 10_000);
+        assert_eq!(
+            log.iter()
+                .filter(|entry| matches!(entry, Logged::Start(..)))
+                .count(),
+            1,
+            "no ranged request after the first unsupported one"
+        );
+        assert!(!log.iter().any(|entry| matches!(entry, Logged::Wait(..))));
+        assert_eq!(written_back(&log), [3000, 6000, 9000]);
+        for (index, entry) in log.iter().enumerate() {
+            if let Logged::Progress(WriteLoopProgress::WrittenBack(_)) = entry {
+                assert_eq!(log[index - 1], Logged::SyncData);
+            }
+        }
+        assert_window_invariants(&log, 10_000, 2500);
+    }
+
+    // W10 fallback. A wait answered "unsupported" is replaced by a data
+    // sync on the spot, which confirms everything accepted.
+    #[test]
+    fn unsupported_wait_falls_back_to_data_sync() {
+        let (result, log, _) = run_windowed(
+            10_000,
+            1000,
+            2500,
+            |target| target.wait = Answer::Unsupported,
+            None,
+        );
+        assert_eq!(result.unwrap(), 10_000);
+        assert_eq!(written_back(&log), [3000, 6000, 9000]);
+        assert_eq!(
+            log.iter()
+                .filter(|entry| matches!(entry, Logged::Wait(..)))
+                .count(),
+            1
+        );
+        assert_window_invariants(&log, 10_000, 2500);
+    }
+
+    // W10 fallback. A failed fallback sync is a failure, not another
+    // fallback, and reports nothing as written back.
+    #[test]
+    fn a_failed_fallback_sync_is_a_writeback_error() {
+        let (result, log, _) = run_windowed(
+            10_000,
+            1000,
+            2500,
+            |target| {
+                target.start = Answer::Unsupported;
+                target.sync_fails = true;
+            },
+            None,
+        );
+        match result {
+            Err(WriteError::Writeback { bytes_written, .. }) => assert_eq!(bytes_written, 3000),
+            other => panic!("expected Writeback, got {other:?}"),
+        }
+        assert!(written_back(&log).is_empty());
+    }
+
+    // `write` (no window) never requests write-back and reports accepted
+    // progress exactly as before.
+    #[test]
+    fn plain_write_reports_accepted_progress_only() {
+        let plan = WritePlan::new(5000, 5000, 1000).unwrap();
+        let mut reported = Vec::new();
+        let mut target = Vec::new();
+        write(
+            &plan,
+            Cursor::new(vec![1u8; 5000]),
+            &mut target,
+            |p| reported.push(p.bytes_written),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(reported, [1000, 2000, 3000, 4000, 5000]);
     }
 }

@@ -259,6 +259,9 @@ impl Tracker {
     // Bytes accepted but not yet confirmed as written back. `None` while
     // no write-back was confirmed (the amount pending is then unknown, not
     // everything accepted) or nothing was accepted.
+    // Not shown yet (the progress display still shows accepted bytes);
+    // tests read it until the display does.
+    #[allow(dead_code)]
     pub fn pending_writeback(&self) -> Option<u64> {
         let accepted = self.written?.done;
         let completed = self.writeback?.done;
@@ -801,6 +804,43 @@ mod tests {
         tracker.apply(&written_back(640));
         assert_eq!(tracker.pending_writeback(), Some(0));
         assert!(tracker.cancel_requested);
+    }
+
+    // Write-back confirmed during the write (the write-back window) updates
+    // the written-back value and the pending amount as it goes, without
+    // changing the activity or the accepted value the bar shows.
+    #[test]
+    fn write_back_during_the_write_updates_pending_as_it_goes() {
+        let mut tracker = through_write(VerifyMode::Quick);
+        tracker.apply(&written_back(128));
+        assert_eq!(tracker.activity, Activity::Writing);
+        assert_eq!(tracker.pending_writeback(), Some(640 - 128));
+
+        tracker.apply(&written(900));
+        tracker.apply(&written_back(384));
+        assert_eq!(tracker.activity, Activity::Writing);
+        assert_eq!(
+            tracker.written,
+            Some(Transfer {
+                done: 900,
+                total: 1000
+            })
+        );
+        assert_eq!(
+            tracker.writeback,
+            Some(Transfer {
+                done: 384,
+                total: 1000
+            })
+        );
+        assert_eq!(tracker.pending_writeback(), Some(900 - 384));
+        assert_eq!(
+            tracker.transfer(),
+            Some(Transfer {
+                done: 900,
+                total: 1000
+            })
+        );
     }
 
     // ---- phase mapping ----

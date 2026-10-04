@@ -30,6 +30,7 @@ use zbus::{
 };
 
 use crate::linux_backend::decode_device_number;
+use crate::writer::WritebackError;
 
 // Why OpenDevice did not return a file descriptor. Classified only by the
 // D-Bus error name (a fixed, locale-independent identifier), never by the
@@ -136,7 +137,6 @@ pub struct OpenedDeviceHandle {
 // see `execution/mod.rs`), not from `main.rs` or any other sibling module.
 // The intended caller within that tree is
 // `core::ActiveWrite::writer_target()` — see that method's doc comment.
-#[allow(dead_code)] // exercised by core.rs's tests today; not yet called from any non-test code path.
 pub(in crate::execution) struct ActiveWriteTarget<'a> {
     file: &'a mut File,
 }
@@ -148,6 +148,88 @@ impl Write for ActiveWriteTarget<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
+    }
+}
+
+// Write-back control for the write loop (`writer::write_with_writeback`),
+// on the same exclusive borrow of the write FD: `sync_file_range(2)` for
+// the ranged requests, `fdatasync(2)` for the fallback. Linux-specific,
+// which is why it lives here and not in `writer.rs`.
+impl crate::writer::Writeback for ActiveWriteTarget<'_> {
+    fn start_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError> {
+        sync_file_range(self.file, offset, len, libc::SYNC_FILE_RANGE_WRITE)
+    }
+
+    // WAIT_BEFORE | WRITE | WAIT_AFTER: waits for write-back already in
+    // flight, starts it for anything still dirty, and waits for that --
+    // the combination that makes the whole range written back.
+    fn wait_writeback(&mut self, offset: u64, len: u64) -> Result<(), WritebackError> {
+        sync_file_range(
+            self.file,
+            offset,
+            len,
+            libc::SYNC_FILE_RANGE_WAIT_BEFORE
+                | libc::SYNC_FILE_RANGE_WRITE
+                | libc::SYNC_FILE_RANGE_WAIT_AFTER,
+        )
+    }
+
+    fn sync_data(&mut self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+}
+
+// One `sync_file_range(2)` call, retried on EINTR, with its error sorted by
+// `classify_writeback_error`.
+fn sync_file_range(
+    file: &File,
+    offset: u64,
+    len: u64,
+    flags: libc::c_uint,
+) -> Result<(), WritebackError> {
+    let (Ok(offset), Ok(len)) = (i64::try_from(offset), i64::try_from(len)) else {
+        // Not reachable for an image that fits a block device; reported as
+        // a failure, never as "unsupported".
+        return Err(WritebackError::Failed(io::Error::from(
+            io::ErrorKind::InvalidInput,
+        )));
+    };
+    loop {
+        // SAFETY: plain syscall on a valid, open FD borrowed for the call;
+        // no memory is passed.
+        let result = unsafe { libc::sync_file_range(file.as_raw_fd(), offset, len, flags) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(classify_writeback_error(error));
+    }
+}
+
+// Which `sync_file_range(2)` errors mean "not available for this FD" (the
+// write loop falls back to `fdatasync`), and which are real failures (the
+// write ends). Only these count as unsupported:
+//
+//   - ENOSYS: the syscall does not exist (old/foreign kernel, emulation,
+//     a seccomp filter);
+//   - EOPNOTSUPP / ENOTSUP: the request is not supported for this file;
+//   - ESPIPE: the FD is not a regular file, block device or directory;
+//   - EINVAL: our arguments are always valid (non-negative offset and
+//     length, known flags), so it can only mean the FD does not take the
+//     request.
+//
+// Everything else -- EIO, ENOSPC, ENODEV, ENXIO, EBADF, ENOMEM, ... -- is a
+// failure: a lost device or an I/O error must never be mistaken for
+// "unsupported" and silently answered with a fallback.
+fn classify_writeback_error(error: io::Error) -> WritebackError {
+    match error.raw_os_error() {
+        Some(libc::ENOSYS | libc::EOPNOTSUPP | libc::ESPIPE | libc::EINVAL) => {
+            WritebackError::Unsupported(error)
+        }
+        _ => WritebackError::Failed(error),
     }
 }
 
@@ -1060,6 +1142,81 @@ pub(crate) fn assert_fd_closed_for_test(raw_fd: RawFd, target_before_drop: Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- write-back (`sync_file_range`) ----
+
+    // Only "not available for this FD" errors are unsupported; I/O errors
+    // and a lost device are failures, never a reason to fall back.
+    #[test]
+    fn writeback_errors_are_classified_strictly() {
+        for errno in [libc::ENOSYS, libc::EOPNOTSUPP, libc::ESPIPE, libc::EINVAL] {
+            assert!(
+                matches!(
+                    classify_writeback_error(io::Error::from_raw_os_error(errno)),
+                    WritebackError::Unsupported(_)
+                ),
+                "errno {errno} should be unsupported"
+            );
+        }
+        for errno in [
+            libc::EIO,
+            libc::ENODEV,
+            libc::ENXIO,
+            libc::ENOSPC,
+            libc::EBADF,
+            libc::ENOMEM,
+            libc::EROFS,
+        ] {
+            assert!(
+                matches!(
+                    classify_writeback_error(io::Error::from_raw_os_error(errno)),
+                    WritebackError::Failed(_)
+                ),
+                "errno {errno} must be a failure"
+            );
+        }
+        // An error without an errno is a failure too.
+        assert!(matches!(
+            classify_writeback_error(io::Error::other("no errno")),
+            WritebackError::Failed(_)
+        ));
+    }
+
+    // The real syscalls through the write target, on a regular file (which
+    // `sync_file_range` accepts like a block device): ranged start and
+    // wait, and the data sync, all succeed and leave the data in place.
+    #[test]
+    fn write_target_runs_sync_file_range_on_its_fd() {
+        use crate::writer::Writeback as _;
+
+        let file = tempfile_for_writeback_test();
+        let mut handle = OpenedDeviceHandle::from_file_for_test(file);
+        let mut target = handle.writer_target();
+        target.write_all(&[7u8; 3 * 4096 + 10]).unwrap();
+
+        target.start_writeback(0, 4096).unwrap();
+        target.start_writeback(4096, 2 * 4096 + 10).unwrap();
+        target.wait_writeback(0, 3 * 4096 + 10).unwrap();
+        target.sync_data().unwrap();
+    }
+
+    fn tempfile_for_writeback_test() -> File {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "linux-usb-writer-writeback-test-{}-{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        file
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // A D-Bus error reply to an OpenDevice call, as zbus hands it to us

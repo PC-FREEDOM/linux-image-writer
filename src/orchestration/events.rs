@@ -93,9 +93,12 @@ pub(crate) enum OperationEvent<'a> {
     // necessarily written back to the device.
     WriteProgress(WriteProgress),
     // Bytes an explicit sync confirmed as written back to the device. Sent
-    // only from a sync result, never from `write()` returns: after the
-    // final `fsync()` (before `SyncSucceeded`), and after a cancelled
-    // write's drain (before its FD is closed). Absent until then.
+    // only from a sync result, never from `write()` returns: during the
+    // write, each time the write-back window's wait succeeded (strictly
+    // increasing, at most the accepted bytes); after the final `fsync()`
+    // (the total, before `SyncSucceeded`); and after a cancelled write's
+    // drain (the accepted bytes, before its FD is closed). Absent until the
+    // first one.
     WritebackProgress(WritebackProgress),
     WriteSucceeded {
         bytes_written: u64,

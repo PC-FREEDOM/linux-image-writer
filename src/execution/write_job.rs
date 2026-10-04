@@ -139,6 +139,7 @@
 #![allow(dead_code)]
 
 use std::io::{self, Read};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -154,7 +155,9 @@ use super::linux_access::{
 use crate::device::{DeviceSnapshot, SnapshotFetchOutcome};
 use crate::image_source::source_identity::SourceChanged;
 use crate::image_source::{ImageSourceAccess, SelectedImage};
-use crate::writer::{self, WriteError, WritePlan, WriteProgress, WritebackProgress};
+use crate::writer::{
+    self, WriteError, WriteLoopProgress, WritePlan, WriteProgress, WritebackProgress,
+};
 
 const CANCEL_NONE: u8 = 0;
 const CANCEL_USER_REQUESTED: u8 = 1;
@@ -319,11 +322,15 @@ fn target_may_be_modified_for_error(error: &WriteError) -> bool {
         // the full image was already handed to the target -- unambiguously
         // modified.
         WriteError::FlushFailed(_) => true,
+
+        // Write-back of accepted chunks failed: those chunks were handed to
+        // the kernel (and possibly partly to the device) -- modified.
+        WriteError::Writeback { .. } => true,
     }
 }
 
 // How many bytes a non-Cancelled `WriteError` reports as written. Only
-// `SourceTooShort` carries this; every other variant reports 0 here as a
+// `SourceTooShort` and `Writeback` carry this; every other variant reports 0 here as a
 // *reporting default*, never as a claim that nothing reached the target --
 // `target_may_be_modified_for_error` above is what actually carries that
 // safety-relevant fact, precisely so a `bytes_written == 0` field can never
@@ -331,6 +338,7 @@ fn target_may_be_modified_for_error(error: &WriteError) -> bool {
 fn write_error_bytes_written(error: &WriteError) -> u64 {
     match error {
         WriteError::SourceTooShort { bytes_written } => *bytes_written,
+        WriteError::Writeback { bytes_written, .. } => *bytes_written,
         // `Writing::write()` peels `Cancelled` off into its own branch
         // before this function is ever called, so this arm is unreachable
         // in practice today -- kept only so this match stays exhaustive
@@ -628,6 +636,11 @@ pub struct Writing<R: Read> {
     verify_mode: VerifyMode,
     source: R,
     cancel: CancelHandle,
+    // How far accepted bytes may run ahead of written-back ones
+    // (`writer::write_with_writeback`). Always
+    // `writer::DEFAULT_WRITEBACK_WINDOW_BYTES` outside tests, which set a
+    // small one to cross window boundaries with small images.
+    writeback_window: NonZeroU64,
 }
 
 // The one and only way to reach a `Writing`. Consumes `authorized` by value:
@@ -666,6 +679,7 @@ fn start_inner<R: Read>(
         verify_mode,
         source,
         cancel,
+        writeback_window: writer::DEFAULT_WRITEBACK_WINDOW_BYTES,
     }
 }
 
@@ -921,7 +935,20 @@ impl WritingExecution {
     // again), the post-verify check in `Verifying::run` for Quick / Full.
     pub fn write(
         self,
-        on_progress: impl FnMut(WriteProgress),
+        mut on_progress: impl FnMut(WriteProgress),
+    ) -> (SelectedImage, WriteAttemptOutcome) {
+        self.write_with_writeback(|progress| {
+            if let WriteLoopProgress::Accepted(progress) = progress {
+                on_progress(progress)
+            }
+        })
+    }
+
+    // `write()`, also reporting the writer's write-back confirmations
+    // (`Writing::write_with_writeback`); the production path uses this one.
+    pub fn write_with_writeback(
+        self,
+        on_progress: impl FnMut(WriteLoopProgress),
     ) -> (SelectedImage, WriteAttemptOutcome) {
         let WritingExecution { writing, image } = self;
 
@@ -939,7 +966,7 @@ impl WritingExecution {
             return (image, WriteAttemptOutcome::Failed(failed));
         }
 
-        let outcome = match writing.write(on_progress) {
+        let outcome = match writing.write_with_writeback(on_progress) {
             WriteAttemptOutcome::Succeeded(succeeded) => match image.revalidate_identity() {
                 Ok(()) => WriteAttemptOutcome::Succeeded(succeeded),
                 // `succeeded` (and the target FD inside it) is dropped here,
@@ -962,12 +989,15 @@ impl WritingExecution {
 
 impl<R: Read> Writing<R> {
     // Consumes this `Writing` to run the one write attempt it was set up
-    // for. Calls `writer::write()` exactly once, with `active.writer_target()`
-    // (the only source of a `std::io::Write` anywhere in this crate) as the
-    // target and `self.cancel.is_requested()` as the cancellation check --
-    // `writer.rs` itself is untouched; this only drives its existing,
-    // unmodified API. `on_progress` is relayed to `writer::write()`'s own
-    // progress callback unchanged.
+    // for. Calls `writer::write_with_writeback()` exactly once, with
+    // `active.writer_target()` (the only source of a `std::io::Write`
+    // anywhere in this crate, and of its write-back control) as the target,
+    // `self.writeback_window` as the window and `self.cancel.is_requested()`
+    // as the cancellation check. `on_progress` receives the writer's
+    // progress unchanged: accepted chunks, and write-back confirmations
+    // (only ever from a successful write-back wait or sync -- see
+    // `writer::write_with_writeback`). `write()` below is the same attempt
+    // reporting accepted progress only.
     //
     // Because `self` is consumed here, the same `Writing` value cannot be
     // used to attempt a second `writer::write()` call -- there is no `&self`
@@ -977,19 +1007,33 @@ impl<R: Read> Writing<R> {
     // runtime test that could demonstrate a compile-time property like this
     // one any more directly).
     pub fn write(self, mut on_progress: impl FnMut(WriteProgress)) -> WriteAttemptOutcome {
+        self.write_with_writeback(|progress| {
+            if let WriteLoopProgress::Accepted(progress) = progress {
+                on_progress(progress)
+            }
+        })
+    }
+
+    // See `write()` above.
+    pub fn write_with_writeback(
+        self,
+        on_progress: impl FnMut(WriteLoopProgress),
+    ) -> WriteAttemptOutcome {
         let Writing {
             mut active,
             plan,
             verify_mode,
             source,
             cancel,
+            writeback_window,
         } = self;
 
-        let result = writer::write(
+        let result = writer::write_with_writeback(
             &plan,
             source,
             active.writer_target(),
-            |progress| on_progress(progress),
+            writeback_window,
+            on_progress,
             || cancel.is_requested(),
         );
 
@@ -2599,6 +2643,182 @@ mod tests {
         assert_eq!(cancelled.bytes_written, 0);
         assert_eq!(cancelled.reason, CancelReason::DeviceLost);
         assert!(!cancelled.target_may_be_modified);
+    }
+
+    // ---- write-back window, through the real target on a temporary file ----
+
+    // Window 10. A failed write-back ends the write as `Failed` (stage
+    // Writing): the target counts as modified, the accepted byte count is
+    // kept, and a retry needs a fresh Gate -- no sync, no Verify, no
+    // cancellation follows from it.
+    #[test]
+    fn a_writeback_failure_is_a_failed_write_with_the_target_modified() {
+        let error = WriteError::Writeback {
+            bytes_written: 3 * 1024,
+            error: io::Error::from_raw_os_error(libc::EIO),
+        };
+        assert!(target_may_be_modified_for_error(&error));
+        assert_eq!(write_error_bytes_written(&error), 3 * 1024);
+    }
+
+    // Runs a `WritingExecution` with the given write-back window, collecting
+    // every progress report.
+    fn write_with_window(
+        mut execution: WritingExecution,
+        window_bytes: u64,
+    ) -> (SelectedImage, WriteAttemptOutcome, Vec<WriteLoopProgress>) {
+        execution.writing.writeback_window = NonZeroU64::new(window_bytes).unwrap();
+        let mut reports = Vec::new();
+        let (image, outcome) = execution.write_with_writeback(|progress| reports.push(progress));
+        (image, outcome, reports)
+    }
+
+    fn last_written_back(reports: &[WriteLoopProgress]) -> Option<u64> {
+        reports.iter().rev().find_map(|progress| match progress {
+            WriteLoopProgress::WrittenBack(p) => Some(p.completed_bytes),
+            _ => None,
+        })
+    }
+
+    // Window 9 (Finalizing). With a window smaller than the image, the loop
+    // confirms write-back as it goes but stops short of the total (the last
+    // window is the final sync's); the final sync then confirms the total.
+    // Raw, gzip and xz sources stream through the window unchanged.
+    #[test]
+    fn windowed_write_leaves_the_last_window_to_the_final_sync() {
+        let chunk = writer::DEFAULT_CHUNK_SIZE as u64;
+        let window_bytes = 2 * chunk;
+        let payload = patterned_data(writer::DEFAULT_CHUNK_SIZE * 5 + 777);
+        let total = payload.len() as u64;
+
+        let raw = write_temp_image_file("window-final-raw", &payload);
+        let gzip = temp_gzip_image("window-final-gzip", &payload);
+        let xz = temp_xz_image(
+            "window-final-xz",
+            &xz_bytes(&payload, liblzma::stream::Check::Crc64),
+        );
+        let images: [(&str, &std::path::Path, SelectedImage); 3] = [
+            (
+                "raw",
+                &raw,
+                SelectedImage::new(Box::new(FileImageSource::new(&raw).unwrap())),
+            ),
+            (
+                "gzip",
+                &gzip,
+                prepared_gzip_image(&gzip, VerifyMode::Full, total),
+            ),
+            (
+                "xz",
+                &xz,
+                SelectedImage::new(Box::new(prepared_xz_source(&xz, VerifyMode::Full, total))),
+            ),
+        ];
+
+        for (name, path, image) in images {
+            let (target_path, execution, _snapshot) = gate_pass_writing_execution_for_image(
+                &format!("window-final-{name}"),
+                image,
+                total,
+                VerifyMode::Full,
+                CancelHandle::new(),
+            );
+            let (_image, outcome, reports) = write_with_window(execution, window_bytes);
+            let succeeded = match outcome {
+                WriteAttemptOutcome::Succeeded(succeeded) => succeeded,
+                other => panic!("{name}: expected Succeeded, got {other:?}"),
+            };
+
+            assert_eq!(
+                last_written_back(&reports),
+                Some(total - window_bytes),
+                "{name}"
+            );
+            assert!(last_written_back(&reports).unwrap() < total, "{name}");
+            let synced = match succeeded.begin_sync().sync() {
+                SyncAttemptOutcome::Succeeded(synced) => synced,
+                other => panic!("{name}: expected sync success, got {other:?}"),
+            };
+            assert_eq!(
+                synced.writeback_progress(),
+                WritebackProgress {
+                    completed_bytes: total,
+                    total_bytes: total,
+                },
+                "{name}"
+            );
+            assert_eq!(std::fs::read(&target_path).unwrap(), payload, "{name}");
+
+            let _ = std::fs::remove_file(&target_path);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    // Window 8 (Cancel). A cancellation under the window leaves at most one
+    // window pending; the drain confirms exactly what was accepted, the FD
+    // closes, and only then is there a `Cancelled`.
+    #[test]
+    fn windowed_write_cancel_leaves_at_most_one_window_for_the_drain() {
+        let chunk = writer::DEFAULT_CHUNK_SIZE as u64;
+        let window_bytes = 2 * chunk;
+        let image_size = 10 * chunk;
+        let (_path, authorized) =
+            gate_pass_active_write("window-cancel", image_size, image_size, false);
+        let cancel = CancelHandle::new();
+        let mut writing = start_inner(
+            authorized,
+            Cursor::new(vec![5u8; image_size as usize]),
+            cancel.clone(),
+        );
+        writing.writeback_window = NonZeroU64::new(window_bytes).unwrap();
+
+        let mut reports = Vec::new();
+        let outcome = writing.write_with_writeback(|progress| {
+            if progress
+                == WriteLoopProgress::Accepted(WriteProgress {
+                    bytes_written: 6 * chunk,
+                    total_bytes: image_size,
+                })
+            {
+                cancel.request_cancel(CancelReason::UserRequested);
+            }
+            reports.push(progress);
+        });
+        let drain = match outcome {
+            WriteAttemptOutcome::CancelRequested(drain) => drain,
+            other => panic!("expected CancelRequested, got {other:?}"),
+        };
+
+        let completed = last_written_back(&reports).unwrap();
+        assert_eq!(drain.bytes_written, 6 * chunk);
+        assert_eq!(completed, 4 * chunk);
+        assert!(drain.bytes_written - completed <= window_bytes);
+
+        let raw_fd = drain.active.raw_fd_for_test();
+        let target = crate::execution::linux_access::fd_proc_target_for_test(raw_fd);
+        let synced = match drain.drain() {
+            CancelDrainOutcome::Synced(synced) => synced,
+            other => panic!("expected Synced, got {other:?}"),
+        };
+        assert_eq!(synced.writeback_progress().completed_bytes, 6 * chunk);
+        let cancelled = synced.close();
+        crate::execution::linux_access::assert_fd_closed_for_test(raw_fd, target.as_deref());
+        assert_eq!(cancelled.bytes_written, 6 * chunk);
+    }
+
+    // The production default is the one constant in `writer.rs`.
+    #[test]
+    fn writing_uses_the_default_writeback_window() {
+        let (_path, authorized) = gate_pass_active_write("window-default", 10, 20, false);
+        let writing = start_inner(authorized, Cursor::new(vec![0u8; 10]), CancelHandle::new());
+        assert_eq!(
+            writing.writeback_window,
+            writer::DEFAULT_WRITEBACK_WINDOW_BYTES
+        );
+        assert_eq!(
+            writer::DEFAULT_WRITEBACK_WINDOW_BYTES.get(),
+            64 * 1024 * 1024
+        );
     }
 
     // F. A source shorter than the Gate-approved image_size becomes Failed

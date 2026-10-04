@@ -48,6 +48,7 @@ use crate::execution::write_job::{
 use crate::image_source::compressed::PreflightError;
 use crate::image_source::{self, ImageSource, ImageSourceError, OpenedImage, SelectedImage};
 use crate::safety::SafetyAssessment;
+use crate::writer::WriteLoopProgress;
 
 // The selected target's baseline snapshot and assessment. Every value in
 // this module that holds a `SelectionState` was built from one that passed
@@ -534,8 +535,14 @@ pub(super) fn run_on(
     observer.on_event(OperationEvent::WriteStarted);
     observer.write_started_on(bound);
 
-    let (image, write_outcome) =
-        writing.write(|progress| observer.on_event(OperationEvent::WriteProgress(progress)));
+    let (image, write_outcome) = writing.write_with_writeback(|progress| match progress {
+        WriteLoopProgress::Accepted(progress) => {
+            observer.on_event(OperationEvent::WriteProgress(progress))
+        }
+        WriteLoopProgress::WrittenBack(progress) => {
+            observer.on_event(OperationEvent::WritebackProgress(progress))
+        }
+    });
     let succeeded = match write_outcome {
         WriteAttemptOutcome::Succeeded(succeeded) => succeeded,
         WriteAttemptOutcome::Failed(failed) => {
@@ -1802,6 +1809,71 @@ mod tests {
         }
     }
 
+    // An image larger than the default write-back window: write-back is
+    // confirmed during the write (between accepted reports, strictly
+    // increasing, never past them), stops one window short of the total,
+    // and the final sync confirms the total.
+    #[test]
+    fn write_back_is_reported_during_a_write_larger_than_the_window() {
+        let window = crate::writer::DEFAULT_WRITEBACK_WINDOW_BYTES.get();
+        let data: Vec<u8> = (0..window as usize + 2 * 1024 * 1024 + 123)
+            .map(|i| (i % 253) as u8)
+            .collect();
+        let total = data.len() as u64;
+        let image = temp_image("window-op", "img", &data);
+        let target = target_file("window-op");
+        let platform = ScriptedPlatform::with_device(snapshots(false, false), device(&target));
+        let mut observer = TestObserver::answering("/dev/sdx");
+
+        assert!(matches!(
+            run(
+                &platform,
+                &image,
+                VerifyMode::None,
+                &CancelHandle::new(),
+                &mut observer
+            ),
+            OperationOutcome::Completed { .. }
+        ));
+
+        let in_loop = &observer.writeback[..observer.writeback.len() - 1];
+        assert!(!in_loop.is_empty());
+        assert!(
+            in_loop
+                .windows(2)
+                .all(|pair| pair[0].completed_bytes < pair[1].completed_bytes)
+        );
+        assert_eq!(in_loop.last().unwrap().completed_bytes, total - window);
+        assert_eq!(
+            observer.writeback.last(),
+            Some(&WritebackProgress {
+                completed_bytes: total,
+                total_bytes: total,
+            })
+        );
+        // The in-loop reports come before the write ends; the last one is
+        // the final sync's.
+        let write_succeeded = observer
+            .events
+            .iter()
+            .position(|name| name == "WriteSucceeded")
+            .unwrap();
+        let writeback_events: Vec<usize> = observer
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| *name == "WritebackProgress")
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            writeback_events[..writeback_events.len() - 1]
+                .iter()
+                .all(|index| *index < write_succeeded)
+        );
+        assert!(*writeback_events.last().unwrap() > write_succeeded);
+        assert_eq!(contents(&target), data);
+    }
+
     // 26.13: a cancellation during the write stops it at the writer's own
     // per-chunk check; nothing is synced or verified.
     #[test]
@@ -2060,7 +2132,7 @@ mod tests {
             "operation.bind(prepared.begin())",
             "execution.begin_write(cancel.clone())",
             "observer.write_started_on(bound)",
-            "writing.write(",
+            "writing.write_with_writeback(",
             "run_off_main_thread(succeeded.begin_sync()",
             "after_successful_sync(cancel.is_requested())",
             "synced.begin_verify(image, cancel.clone())",
