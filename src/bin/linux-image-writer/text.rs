@@ -372,22 +372,35 @@ pub fn mark_icon(mark: Mark) -> &'static str {
     }
 }
 
-// The operation view's heading while it runs.
-pub fn headline(step: Step) -> String {
-    match step {
-        Step::Prepare => tr("Preparing to Write"),
-        Step::Write => tr("Writing to USB"),
-        Step::Verify => tr("Checking the Written Data"),
+// The operation view's heading while it runs: the current phase.
+pub fn headline(tracker: &Tracker) -> String {
+    if tracker.cancel_requested {
+        return tr("Cancelling");
+    }
+    match (tracker.step(), tracker.activity) {
+        (Step::Prepare, _) => tr("Preparing to Write"),
+        (Step::Write, Activity::Syncing) => tr("Finishing the Write"),
+        (Step::Write, _) => tr("Writing to USB"),
+        (Step::Verify, _) => match tracker.verify_mode {
+            VerifyMode::Full => tr("Checking All of the Written Data"),
+            _ => tr("Checking the Written Data"),
+        },
     }
 }
 
 // What the operation is doing, and a line under it.
 pub fn activity(tracker: &Tracker) -> (String, String) {
-    if tracker.cancel_requested {
-        return (tr("Cancelling…"), tr("Please wait until it stops."));
-    }
     let not_written = || tr("Nothing has been written to the USB drive yet.");
     let keep_connected = || tr("Do not remove the USB drive.");
+    if tracker.cancel_requested {
+        // The heading already says "Cancelling".
+        let note = if tracker.step() == Step::Write {
+            keep_connected()
+        } else {
+            String::new()
+        };
+        return (tr("Please wait until it stops."), note);
+    }
     let authentication =
         || tr("If the system asks you to authenticate, complete the authentication.");
     match tracker.activity {
@@ -410,8 +423,8 @@ pub fn activity(tracker: &Tracker) -> (String, String) {
         }
         Activity::Writing => (tr("Writing"), keep_connected()),
         Activity::Syncing => (
-            tr("Finishing the write…"),
-            tr("Completing the write to the USB drive. Do not remove it."),
+            tr("Waiting for the USB drive to finish writing…"),
+            keep_connected(),
         ),
         Activity::PreparingVerify => (tr("Preparing verification…"), keep_connected()),
         Activity::Verifying => match tracker.verify_mode {
@@ -426,6 +439,82 @@ pub fn activity(tracker: &Tracker) -> (String, String) {
         },
         Activity::Finished => (String::new(), String::new()),
     }
+}
+
+// The line under the progress bar: the current phase's own progress, in
+// bytes. Written-back bytes, not accepted ones, are "written to the USB
+// drive"; while none is confirmed yet, the bytes read from the image are
+// said as such. `None` when the phase has nothing measurable to say.
+pub fn phase_detail(tracker: &Tracker) -> Option<String> {
+    let pending = || tracker.pending_writeback().filter(|pending| *pending > 0);
+    if tracker.cancel_requested {
+        if tracker.step() != Step::Write {
+            return None;
+        }
+        return Some(match pending() {
+            Some(pending) => fill(
+                tr("Safely stopping the write: about {size} left to write"),
+                &[("size", &size(pending))],
+            ),
+            None => tr("Safely stopping the write"),
+        });
+    }
+    match tracker.activity {
+        Activity::Preflight => tracker.preflight.map(|t| transfer(t.done, t.total)),
+        Activity::Writing => match (tracker.writeback, tracker.written) {
+            (Some(writeback), _) => Some(fill(
+                tr("Written to the USB drive: {amount}"),
+                &[("amount", &transfer(writeback.done, writeback.total))],
+            )),
+            (None, Some(accepted)) => Some(fill(
+                tr(
+                    "Waiting for the USB drive to confirm the first data ({size} read from the image)",
+                ),
+                &[("size", &size(accepted.done))],
+            )),
+            (None, None) => None,
+        },
+        Activity::Syncing if tracker.synced => None,
+        Activity::Syncing => Some(match pending() {
+            Some(pending) => fill(
+                tr("Finishing the last {size} or so"),
+                &[("size", &size(pending))],
+            ),
+            None => tr("Confirming the write to the USB drive"),
+        }),
+        Activity::Verifying => tracker.verified.map(|verified| {
+            fill(
+                tr("Checking: {amount}"),
+                &[("amount", &transfer(verified.done, verified.total))],
+            )
+        }),
+        _ => None,
+    }
+}
+
+// Why the window cannot be closed now: a heading and a line. Only asked
+// while the operation runs.
+pub fn cannot_close(tracker: &Tracker) -> (String, String) {
+    if tracker.cancel_requested && tracker.step() == Step::Write {
+        return (
+            tr("Cancelling"),
+            tr(
+                "The write to the USB drive is being stopped safely. The window cannot be closed until it has finished.",
+            ),
+        );
+    }
+    if tracker.activity == Activity::Syncing && !tracker.cancel_requested {
+        return (
+            tr("Finishing the Write"),
+            tr(
+                "The rest of the data is being written to the USB drive. The window cannot be closed until it has finished.",
+            ),
+        );
+    }
+    (
+        tr("Writing in Progress"),
+        tr("The window cannot be closed until it has finished. To stop, press “Cancel”."),
+    )
 }
 
 // ---- The result ----
@@ -956,9 +1045,12 @@ mod tests {
             tracker.compression = Some(CompressionFormat::Gzip);
             assert_eq!(activity(&tracker).0, "展開しながら書き込み中");
             tracker.activity = Activity::Syncing;
-            assert_eq!(activity(&tracker).0, "書き込みを仕上げています…");
+            assert_eq!(
+                activity(&tracker).0,
+                "USB ドライブの書き込み完了を待っています…"
+            );
             tracker.cancel_requested = true;
-            assert_eq!(activity(&tracker).0, "中止しています…");
+            assert_eq!(activity(&tracker).0, "処理が止まるまでお待ちください。");
         });
     }
 
@@ -985,10 +1077,167 @@ mod tests {
             for text in [
                 activity(&tracker).0,
                 activity(&tracker).1,
-                headline(Step::Verify),
+                headline(&tracker),
             ] {
                 assert!(!text.contains("安全"), "{text}");
             }
+        });
+    }
+
+    // ---- current phase and phase detail ----
+
+    fn tracker_at(mode: VerifyMode, activity: Activity) -> Tracker {
+        let mut tracker = Tracker::new(mode);
+        tracker.activity = activity;
+        tracker
+    }
+
+    fn transfer_of(done: u64, total: u64) -> Option<crate::operation::Transfer> {
+        Some(crate::operation::Transfer { done, total })
+    }
+
+    // The heading names the phase: preparing, writing, finishing, checking
+    // (Quick or Full), cancelling.
+    #[test]
+    fn the_heading_names_the_current_phase() {
+        crate::i18n::ja(|| {
+            let heading = |mode, activity| headline(&tracker_at(mode, activity));
+            assert_eq!(
+                heading(VerifyMode::Quick, Activity::Starting),
+                "書き込みを準備しています"
+            );
+            assert_eq!(
+                heading(VerifyMode::Quick, Activity::Writing),
+                "USB に書き込んでいます"
+            );
+            assert_eq!(
+                heading(VerifyMode::Quick, Activity::Syncing),
+                "書き込みを仕上げています"
+            );
+            assert_eq!(
+                heading(VerifyMode::Quick, Activity::Verifying),
+                "書き込んだデータを確認しています"
+            );
+            assert_eq!(
+                heading(VerifyMode::Full, Activity::Verifying),
+                "書き込んだデータをすべて確認しています"
+            );
+            let mut cancelling = tracker_at(VerifyMode::Quick, Activity::Writing);
+            cancelling.cancel_requested = true;
+            assert_eq!(headline(&cancelling), "中止しています");
+        });
+    }
+
+    // Writing: written-back bytes are "written to the USB drive"; before
+    // the first confirmation, the bytes read are said as read -- never as
+    // written.
+    #[test]
+    fn writing_detail_says_written_back_bytes_only() {
+        crate::i18n::ja(|| {
+            let mut tracker = tracker_at(VerifyMode::Quick, Activity::Writing);
+            assert_eq!(phase_detail(&tracker), None);
+            tracker.written = transfer_of(30_000_000, 3_990_000_000);
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "USB への書き込みの確認を待っています（イメージから 30.0 MB 読み込み済み）"
+            );
+            tracker.written = transfer_of(2_900_000_000, 3_990_000_000);
+            tracker.writeback = transfer_of(2_840_000_000, 3_990_000_000);
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "USB に書き込み済み: 2.84 GB / 3.99 GB"
+            );
+        });
+    }
+
+    // Finishing: what is left, when known; otherwise that the write is
+    // being confirmed. The sync's own end says nothing more.
+    #[test]
+    fn finishing_detail_says_what_is_left() {
+        crate::i18n::ja(|| {
+            let mut tracker = tracker_at(VerifyMode::None, Activity::Syncing);
+            tracker.written = transfer_of(3_990_000_000, 3_990_000_000);
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "USB への書き込みを確定しています"
+            );
+            tracker.writeback = transfer_of(3_949_000_000, 3_990_000_000);
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "残り約 41.0 MB を仕上げています"
+            );
+            tracker.writeback = transfer_of(3_990_000_000, 3_990_000_000);
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "USB への書き込みを確定しています"
+            );
+            tracker.synced = true;
+            assert_eq!(phase_detail(&tracker), None);
+        });
+    }
+
+    // Cancelling during the write: what is left to write before it stops,
+    // when known -- never "cancelled" before the outcome says so.
+    #[test]
+    fn cancelling_detail_says_what_is_left_to_stop_safely() {
+        crate::i18n::ja(|| {
+            let mut tracker = tracker_at(VerifyMode::Quick, Activity::Writing);
+            tracker.cancel_requested = true;
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "書き込みを安全に終了しています"
+            );
+            tracker.written = transfer_of(700_000_000, 3_990_000_000);
+            tracker.writeback = transfer_of(659_000_000, 3_990_000_000);
+            let detail = phase_detail(&tracker).unwrap();
+            assert_eq!(detail, "残り約 41.0 MB の書き込みを安全に終了しています");
+            assert!(!detail.contains("中止しました"));
+            assert_eq!(headline(&tracker), "中止しています");
+            // Outside the write, a cancellation has nothing to finish.
+            let mut verifying = tracker_at(VerifyMode::Full, Activity::Verifying);
+            verifying.cancel_requested = true;
+            assert_eq!(phase_detail(&verifying), None);
+        });
+    }
+
+    // Verify: the bytes checked, as reported.
+    #[test]
+    fn verify_detail_shows_the_bytes_checked() {
+        crate::i18n::ja(|| {
+            let mut tracker = tracker_at(VerifyMode::Quick, Activity::Verifying);
+            tracker.verified = transfer_of(8_000_000, 12_000_000);
+            assert_eq!(
+                phase_detail(&tracker).unwrap(),
+                "確認中: 8.00 MB / 12.00 MB"
+            );
+            tracker.verify_mode = VerifyMode::Full;
+            tracker.verified = transfer_of(1_420_000_000, 3_990_000_000);
+            assert_eq!(phase_detail(&tracker).unwrap(), "確認中: 1.42 GB / 3.99 GB");
+        });
+    }
+
+    // Closing is refused with the reason that applies now.
+    #[test]
+    fn closing_is_refused_with_the_current_reason() {
+        crate::i18n::ja(|| {
+            let mut tracker = tracker_at(VerifyMode::Quick, Activity::Writing);
+            assert_eq!(cannot_close(&tracker).0, "書き込み処理の実行中です");
+            tracker.activity = Activity::Syncing;
+            assert_eq!(
+                cannot_close(&tracker),
+                (
+                    "書き込みを仕上げています".to_string(),
+                    "残りのデータを USB ドライブに書き込んでいます。完了するまで、ウィンドウは閉じられません。".to_string()
+                )
+            );
+            tracker.cancel_requested = true;
+            assert_eq!(
+                cannot_close(&tracker),
+                (
+                    "中止しています".to_string(),
+                    "USB への書き込みを安全に終了しています。完了するまで、ウィンドウは閉じられません。".to_string()
+                )
+            );
         });
     }
 

@@ -26,6 +26,7 @@ mod expansion;
 mod i18n;
 mod model;
 mod operation;
+mod progress;
 mod result;
 mod text;
 mod window;

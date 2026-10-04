@@ -18,6 +18,8 @@ use linux_image_writer::{
     OperationOutcome, VerifyMode, VerifyNotStarted, WorkerEvent,
 };
 
+use crate::progress::{self, OverallProgress};
+
 // ---- What the operation is doing ----
 
 // The operation's latest reported activity. Derived only from the worker's
@@ -86,15 +88,6 @@ impl Transfer {
             (self.done.min(self.total) as f64) / (self.total as f64)
         }
     }
-
-    // Whole percent, rounded down: 100 only once everything is done.
-    pub fn percent(self) -> u64 {
-        if self.total == 0 {
-            0
-        } else {
-            (u128::from(self.done.min(self.total)) * 100 / u128::from(self.total)) as u64
-        }
-    }
 }
 
 // What the worker has reported so far, for display.
@@ -125,6 +118,11 @@ pub struct Tracker {
     // The user asked to stop (Cancel, or declining the confirmation); the
     // operation decides where it actually stops.
     pub cancel_requested: bool,
+    // The final sync succeeded (`SyncSucceeded`): Finalize is done.
+    pub synced: bool,
+    // The overall progress last shown while not cancelling: the bar never
+    // goes below it (see `overall`).
+    overall_floor: f64,
 }
 
 impl Tracker {
@@ -144,10 +142,17 @@ impl Tracker {
             writeback: None,
             verified: None,
             cancel_requested: false,
+            synced: false,
+            overall_floor: 0.0,
         }
     }
 
     pub fn apply(&mut self, event: &WorkerEvent) {
+        self.record(event);
+        self.settle_overall();
+    }
+
+    fn record(&mut self, event: &WorkerEvent) {
         match event {
             WorkerEvent::TargetSelected {
                 target,
@@ -233,9 +238,13 @@ impl Tracker {
             // arrives (the drain cannot be interrupted).
             WorkerEvent::CancelDrainStarted { .. }
             | WorkerEvent::CancelDrainOnCallingThread { .. } => self.cancel_requested = true,
-            WorkerEvent::SyncStarted
-            | WorkerEvent::SyncOnCallingThread { .. }
-            | WorkerEvent::SyncSucceeded { .. } => self.activity = Activity::Syncing,
+            WorkerEvent::SyncStarted | WorkerEvent::SyncOnCallingThread { .. } => {
+                self.activity = Activity::Syncing
+            }
+            WorkerEvent::SyncSucceeded { .. } => {
+                self.activity = Activity::Syncing;
+                self.synced = true;
+            }
             WorkerEvent::VerifyPending { mode } => {
                 self.verify_mode = *mode;
                 self.activity = Activity::PreparingVerify;
@@ -256,12 +265,36 @@ impl Tracker {
         }
     }
 
+    // The overall progress to show while the operation runs (the result
+    // view shows `progress::COMPLETED` for a completed one): what the
+    // reports measure (`progress::measured`), never below what was shown
+    // before, and -- while a cancellation is under way -- frozen at what was
+    // shown when it was requested, with activity.
+    pub fn overall(&self) -> OverallProgress {
+        if self.cancel_requested {
+            return OverallProgress {
+                fraction: self.overall_floor,
+                busy: true,
+            };
+        }
+        let measured = progress::measured(self);
+        OverallProgress {
+            fraction: measured.fraction.max(self.overall_floor),
+            busy: measured.busy,
+        }
+    }
+
+    // Records the value shown, so it never goes backwards (not while
+    // cancelling: then it stays frozen).
+    fn settle_overall(&mut self) {
+        if !self.cancel_requested {
+            self.overall_floor = self.overall().fraction;
+        }
+    }
+
     // Bytes accepted but not yet confirmed as written back. `None` while
     // no write-back was confirmed (the amount pending is then unknown, not
     // everything accepted) or nothing was accepted.
-    // Not shown yet (the progress display still shows accepted bytes);
-    // tests read it until the display does.
-    #[allow(dead_code)]
     pub fn pending_writeback(&self) -> Option<u64> {
         let accepted = self.written?.done;
         let completed = self.writeback?.done;
@@ -271,6 +304,7 @@ impl Tracker {
     // The worker asked for the final confirmation.
     pub fn confirmation_requested(&mut self) {
         self.activity = Activity::AwaitingConfirmation;
+        self.settle_overall();
     }
 
     // The user's answer to the confirmation was delivered.
@@ -280,6 +314,7 @@ impl Tracker {
         } else {
             self.cancel_requested = true;
         }
+        self.settle_overall();
     }
 
     pub fn finished(&mut self) {
@@ -315,16 +350,6 @@ impl Tracker {
             Step::Prepare => [Mark::Active, Mark::Waiting, verify_waiting],
             Step::Write => [Mark::Done, Mark::Active, verify_waiting],
             Step::Verify => [Mark::Done, Mark::Done, Mark::Active],
-        }
-    }
-
-    // What the progress bar shows now, if anything.
-    pub fn transfer(&self) -> Option<Transfer> {
-        match self.activity {
-            Activity::Preflight => self.preflight,
-            Activity::Writing | Activity::Syncing => self.written,
-            Activity::Verifying => self.verified,
-            _ => None,
         }
     }
 
@@ -410,6 +435,14 @@ pub enum Ending {
     },
     // The worker ended without an outcome (it panicked).
     Lost,
+}
+
+impl Ending {
+    // `OperationOutcome::Completed`: written, synced, and verified or with
+    // no Verify requested. The only ending shown at 100%.
+    pub fn is_completed(self) -> bool {
+        matches!(self, Ending::Verified(_) | Ending::WrittenWithoutVerify)
+    }
 }
 
 // Why an operation failed, in the user's terms (worded in `text`).
@@ -834,13 +867,10 @@ mod tests {
             })
         );
         assert_eq!(tracker.pending_writeback(), Some(900 - 384));
-        assert_eq!(
-            tracker.transfer(),
-            Some(Transfer {
-                done: 900,
-                total: 1000
-            })
-        );
+        // The bar follows the written-back bytes, not the accepted ones.
+        let w = crate::progress::weights(VerifyMode::Quick);
+        let expected = w.prepare_end + (w.write_end - w.prepare_end) * 0.384;
+        assert!((tracker.overall().fraction - expected).abs() < 1e-9);
     }
 
     // ---- phase mapping ----
@@ -861,7 +891,13 @@ mod tests {
         }));
         assert_eq!(tracker.activity, Activity::Preflight);
         // Preflight progress is the compressed file's, as reported.
-        assert_eq!(tracker.transfer().map(Transfer::percent), Some(25));
+        assert_eq!(
+            tracker.preflight,
+            Some(Transfer {
+                done: 50,
+                total: 200
+            })
+        );
         tracker.apply(&WorkerEvent::ImageSelected { image_size: 1000 });
         tracker.confirmation_requested();
         assert_eq!(tracker.activity, Activity::AwaitingConfirmation);
@@ -879,7 +915,7 @@ mod tests {
         assert_eq!(tracker.step(), Step::Write);
         assert_eq!(tracker.marks(), [Mark::Done, Mark::Active, Mark::Waiting]);
         assert_eq!(
-            tracker.transfer(),
+            tracker.written,
             Some(Transfer {
                 done: 640,
                 total: 1000
@@ -892,7 +928,13 @@ mod tests {
         tracker.apply(&WorkerEvent::SyncStarted);
         assert_eq!(tracker.activity, Activity::Syncing);
         assert_eq!(tracker.step(), Step::Write);
-        assert_eq!(tracker.transfer().map(Transfer::percent), Some(100));
+        assert_eq!(
+            tracker.written,
+            Some(Transfer {
+                done: 1000,
+                total: 1000
+            })
+        );
     }
 
     #[test]
@@ -932,7 +974,13 @@ mod tests {
             assert_eq!(tracker.activity, Activity::Verifying);
             assert_eq!(tracker.verify_mode, mode);
             assert_eq!(tracker.marks(), [Mark::Done, Mark::Done, Mark::Active]);
-            assert_eq!(tracker.transfer().map(Transfer::percent), Some(25));
+            assert_eq!(
+                tracker.verified,
+                Some(Transfer {
+                    done: 30,
+                    total: 120
+                })
+            );
         }
     }
 
@@ -1260,14 +1308,12 @@ mod tests {
     // ---- formatting ----
 
     #[test]
-    fn progress_rounds_down() {
+    fn transfer_fraction_is_clamped() {
         let t = |done, total| Transfer { done, total };
-        assert_eq!(t(0, 1000).percent(), 0);
-        assert_eq!(t(999, 1000).percent(), 99);
-        assert_eq!(t(1000, 1000).percent(), 100);
-        assert_eq!(t(5, 0).percent(), 0);
-        assert_eq!(t(2000, 1000).percent(), 100);
+        assert_eq!(t(0, 1000).fraction(), 0.0);
+        assert_eq!(t(5, 0).fraction(), 0.0);
+        assert_eq!(t(2000, 1000).fraction(), 1.0);
         assert!((t(640, 1000).fraction() - 0.64).abs() < 1e-9);
-        assert_eq!(t(u64::MAX, u64::MAX).percent(), 100);
+        assert_eq!(t(u64::MAX, u64::MAX).fraction(), 1.0);
     }
 }

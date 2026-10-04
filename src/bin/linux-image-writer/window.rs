@@ -29,6 +29,7 @@ use crate::model::{
     VerifyState,
 };
 use crate::operation::{self, CancelAction, Ending, Mark, STEPS, Tracker};
+use crate::progress::{self, OverallProgress};
 use crate::result::{
     self, Leaving, RemovalNotice, RemovalPresentation, RemovalStatus, ResultAction, ResultKind,
 };
@@ -383,11 +384,15 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         let ui_ref = ui.clone();
         ui.window.connect_close_request(move |_| {
             if operation_running(&ui_ref) {
-                show_cannot_close(
-                    &ui_ref,
-                    &tr("Writing in Progress"),
-                    &tr("The window cannot be closed until it has finished. To stop, press “Cancel”."),
-                );
+                // Why, in the operation's current terms (finishing or
+                // stopping the write safely, or running).
+                let (heading, body) = ui_ref
+                    .operation
+                    .borrow()
+                    .as_ref()
+                    .map(|operation| text::cannot_close(&operation.tracker))
+                    .unwrap_or_default();
+                show_cannot_close(&ui_ref, &heading, &body);
                 glib::Propagation::Stop
             } else if removal_running(&ui_ref) {
                 show_cannot_close(
@@ -2081,6 +2086,22 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     )
 }
 
+// Shows the overall progress on the bar: its fixed value as text, and
+// either that value as the fill or, while `busy`, a pulse.
+fn show_overall(bar: &gtk::ProgressBar, overall: OverallProgress, phase: &str) {
+    let percent = format!("{}%", overall.percent());
+    if overall.busy {
+        bar.pulse();
+    } else {
+        bar.set_fraction(overall.fraction);
+    }
+    bar.set_text(Some(&percent));
+    bar.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{phase} {percent}"
+    ))]);
+    bar.set_visible(true);
+}
+
 fn render_operation(ui: &Ui) {
     let operation = ui.operation.borrow();
     let Some(operation) = operation.as_ref() else {
@@ -2135,31 +2156,24 @@ fn render_operation(ui: &Ui) {
     match &view {
         None => {
             let (status, note) = text::activity(tracker);
-            op.title.set_text(&text::headline(tracker.step()));
+            let headline = text::headline(tracker);
+            op.title.set_text(&headline);
             op.status.set_text(&status);
             op.status.set_visible(!status.is_empty());
             op.spinner.set_visible(!status.is_empty());
             op.note.set_text(&note);
             op.note.set_visible(!note.is_empty());
-            match tracker.transfer() {
-                Some(transfer) => {
-                    let percent = format!("{}%", transfer.percent());
-                    op.progress.set_fraction(transfer.fraction());
-                    op.progress.set_text(Some(&percent));
-                    op.progress
-                        .update_property(&[gtk::accessible::Property::Label(&format!(
-                            "{status} {percent}"
-                        ))]);
-                    op.amount
-                        .set_text(&text::transfer(transfer.done, transfer.total));
-                    op.progress.set_visible(true);
-                    op.amount.set_visible(true);
-                }
-                None => {
-                    op.progress.set_visible(false);
-                    op.amount.set_visible(false);
-                }
+            // The bar is the whole operation's progress
+            // (`Tracker::overall`). Where the value cannot move although
+            // work continues (finishing, stopping, waiting for the first
+            // write-back confirmation), it pulses -- this runs on every
+            // worker poll -- with the fixed value still in its text.
+            if let Some(overall) = progress::shown(tracker, None) {
+                show_overall(&op.progress, overall, &headline);
             }
+            let detail = text::phase_detail(tracker);
+            op.amount.set_text(detail.as_deref().unwrap_or_default());
+            op.amount.set_visible(detail.is_some());
             op.message.set_visible(false);
             op.icon.set_visible(false);
             op.removal.list.set_visible(false);
@@ -2179,7 +2193,14 @@ fn render_operation(ui: &Ui) {
             op.status.set_visible(false);
             op.spinner.set_visible(false);
             op.note.set_visible(false);
-            op.progress.set_visible(false);
+            // 100% only for a completed operation; a cancelled or failed
+            // one shows no progress at all.
+            match progress::shown(tracker, operation.ended.as_ref().map(|(ending, _)| *ending)) {
+                Some(overall) => {
+                    show_overall(&op.progress, overall, &text::result_title(view.case))
+                }
+                None => op.progress.set_visible(false),
+            }
             op.amount.set_visible(false);
             op.message.set_text(&text::result_message(view.case));
             op.message.set_visible(true);
