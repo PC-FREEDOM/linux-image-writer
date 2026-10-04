@@ -5,8 +5,13 @@
 @define-color window_bg_color #1e2125;
 @define-color headerbar_bg_color #262a2f;
 @define-color view_bg_color #191c1f;
+/* Cards and panels a step lighter than the window, a little cooler than
+ * libadwaita's own. */
+@define-color card_bg_color #262a2f;
 @define-color dialog_bg_color #2c3136;
 @define-color popover_bg_color #2c3136;
 /* The standalone accent on the dark palette: the yellow itself (what
  * libadwaita 1.6 and later derive; 1.5 needs it set). */
 @define-color accent_color #ffcc00;
+/* Orange warnings, readable on the dark palette. */
+@define-color warning_color #ffa348;

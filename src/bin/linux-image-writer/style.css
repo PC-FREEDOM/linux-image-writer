@@ -1,18 +1,24 @@
 /* Linux Image Writer -- visual polish.
  *
+ * An instrument-like storage utility: charcoal/slate neutrals, with the
+ * PC-FREEDOM yellow used as an accent only -- the primary action, the
+ * selected choice, focus, the progress fill and a thin brand line -- never
+ * as a large surface. Warnings are orange, so they never read as the
+ * primary action.
+ *
  * Built on libadwaita's own named colours, so light, dark and high contrast
- * keep working: only the accent, a slightly cooler (slate) neutral palette
- * and a few app-specific classes (all prefixed `liw-`) are set here. Every
- * state shown in colour is also shown in words and icons by the code.
+ * keep working: only the accent, the warning colours, a slightly cooler
+ * neutral palette and a few app-specific classes (all prefixed `liw-`) are
+ * set here. Every state shown in colour is also shown in words, icons or
+ * sensitivity by the code.
  *
  * Written for GTK 4.14 / libadwaita 1.5 and every later version alike:
- * colours are set with `@define-color` and derived with `alpha()`, which all
- * of them understand, not with CSS custom properties, `var()` or
- * `color-mix()` (GTK 4.16 and later only). One stylesheet serves every build,
- * whatever GTK it runs on. */
+ * colours are set with `@define-color` and derived with `alpha()` and
+ * `mix()`, which all of them understand, not with CSS custom properties,
+ * `var()` or `color-mix()` (GTK 4.16 and later only). One stylesheet serves
+ * every build, whatever GTK it runs on. */
 
-/* PC-FREEDOM yellow as the accent: the primary action, the selected
- * choice, focus rings, progress and the active step. Text on it is dark. */
+/* PC-FREEDOM yellow as the accent. Text on it is dark. */
 @define-color accent_bg_color #ffcc00;
 @define-color accent_fg_color rgba(0, 0, 6, 0.87);
 /* The standalone accent, for accent-coloured text, progress and the active
@@ -21,15 +27,40 @@
  * these from accent_bg_color; 1.5 does not, so they are set. */
 @define-color accent_color #895900;
 
+/* Warnings in orange (GNOME's orange), apart from the yellow accent. The
+ * standalone colour keeps text contrast on the window background. */
+@define-color warning_bg_color #e66100;
+@define-color warning_fg_color #ffffff;
+@define-color warning_color #a84300;
+
 /* A cooler, charcoal/slate neutral palette, as light as libadwaita's own
  * (text contrast is unchanged; high contrast adds its own borders on top).
  * The dark palette is style-dark.css, applied while the style is dark. */
 @define-color window_bg_color #f3f4f6;
 @define-color headerbar_bg_color #e9ecef;
 @define-color view_bg_color #ffffff;
+@define-color card_bg_color #ffffff;
 
-/* Throughout: corners of 8px, and thin outlines in the text colour at 14%
- * (`alpha(currentColor, 0.14)`). */
+/* Throughout: corners of 8px (10px for the progress area), and thin
+ * outlines in the text colour at 14% (`alpha(currentColor, 0.14)`). */
+
+/* ---- Brand: the product name first, PC-FREEDOM quietly under it, and a
+ * thin yellow line under the header bar ---- */
+
+headerbar.liw-brand {
+  box-shadow: inset 0 -2px 0 alpha(@accent_bg_color, 0.9);
+}
+
+headerbar.liw-brand windowtitle .title {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+headerbar.liw-brand windowtitle .subtitle {
+  font-size: 0.8em;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}
 
 /* ---- Lists: less rounded, no drop shadow, a thin outline ---- */
 
@@ -59,6 +90,13 @@
   border-bottom-right-radius: 8px;
 }
 
+/* The chosen target: a little lighter, with a thin yellow edge (it also
+ * shows a checked radio button and says "Selected"). */
+.liw-sections list.boxed-list > row.liw-selected {
+  background-color: alpha(currentColor, 0.04);
+  box-shadow: inset 3px 0 0 @accent_bg_color;
+}
+
 /* ---- Section titles: a quieter, instrument-like label ---- */
 
 .liw-sections preferencesgroup > box > box.header {
@@ -69,6 +107,7 @@
 .liw-sections preferencesgroup > box > box.header label.heading {
   font-size: 0.92em;
   letter-spacing: 0.04em;
+  opacity: 0.8;
 }
 
 /* The Verify choices sit in the same kind of outlined panel as the lists. */
@@ -79,36 +118,154 @@
   box-shadow: 0 0 0 1px alpha(currentColor, 0.14);
 }
 
-/* ---- The always-shown warning: a quiet panel, not an alarm ---- */
+/* Selected choices: a yellow ring and dot, lighter than the filled primary
+ * button, so the two do not compete. */
+.liw-sections checkbutton radio:checked,
+.liw-options-panel checkbutton radio:checked {
+  background-color: transparent;
+  color: @accent_color;
+  box-shadow: inset 0 0 0 2px @accent_color;
+}
 
+/* ---- The write area: warning, what is still needed, then the action ---- */
+
+/* The always-shown warning: a quiet orange strip, not an alarm, and not
+ * the yellow of the action under it. */
 .liw-warning {
   padding: 7px 14px;
   border-radius: 8px;
-  background-color: alpha(@warning_bg_color, 0.1);
-  box-shadow: inset 0 0 0 1px alpha(@warning_color, 0.4);
+  background-color: alpha(@warning_bg_color, 0.08);
+  box-shadow: inset 3px 0 0 @warning_color, inset 0 0 0 1px alpha(@warning_color, 0.3);
 }
 
 .liw-warning > image {
   color: @warning_color;
 }
 
-/* ---- Buttons: moderate corners instead of pills ---- */
+.liw-write-area > .liw-write-status {
+  font-size: 0.92em;
+}
+
+.liw-write-area > button.liw-primary {
+  margin-top: 4px;
+}
+
+/* ---- Buttons: moderate corners instead of pills, one size ---- */
 
 button.liw-primary {
   min-height: 24px;
+  min-width: 200px;
   padding: 10px 28px;
   border-radius: 8px;
 }
 
-button.liw-action {
-  padding: 8px 18px;
-  border-radius: 8px;
+/* The primary action: the full, clear yellow -- the strongest thing on
+ * the screen. */
+button.liw-primary.suggested-action {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+  font-weight: 800;
+  box-shadow: 0 1px 2px alpha(black, 0.2);
+}
+
+button.liw-primary.suggested-action:hover {
+  background-color: mix(@accent_bg_color, white, 0.15);
+}
+
+button.liw-primary.suggested-action:active {
+  background-color: mix(@accent_bg_color, black, 0.1);
 }
 
 /* Not yet possible is neutral grey, never a faded yellow or an error. */
 button.liw-primary.suggested-action:disabled {
   background-color: alpha(currentColor, 0.1);
   color: inherit;
+  box-shadow: none;
+}
+
+button.liw-action {
+  min-height: 24px;
+  padding: 8px 20px;
+  border-radius: 8px;
+}
+
+/* Cancel: an ordinary button with a thin red edge -- stopping, clearly,
+ * without the alarm of a destructive action. Disabled while cancelling. */
+button.liw-cancel {
+  box-shadow: inset 0 0 0 1px alpha(@error_color, 0.45);
+}
+
+button.liw-cancel:disabled {
+  box-shadow: none;
+}
+
+/* ---- The operation: phase, progress area, status ---- */
+
+.liw-headline {
+  font-weight: 800;
+}
+
+/* The progress area: its own quiet card. */
+.liw-progress-card {
+  padding: 16px 18px 14px;
+  border-radius: 10px;
+  background-color: @card_bg_color;
+  box-shadow: 0 0 0 1px alpha(currentColor, 0.1);
+}
+
+progressbar.liw-progress > trough {
+  min-height: 10px;
+  border-radius: 5px;
+  background-color: alpha(currentColor, 0.12);
+}
+
+progressbar.liw-progress > trough > progress {
+  min-height: 10px;
+  border-radius: 5px;
+  background-color: @accent_color;
+}
+
+.liw-progress-percent {
+  font-size: 1.25em;
+  font-weight: 800;
+  min-width: 3.2em;
+}
+
+.liw-progress-detail {
+  opacity: 0.85;
+}
+
+/* The spinner beside the detail: that the operation is still working. */
+.liw-activity {
+  min-width: 16px;
+  min-height: 16px;
+}
+
+/* Busy: the value cannot move although work continues (finishing,
+ * stopping, waiting for the first confirmation). The fill stays at the
+ * measured value and breathes; the spinner beside the detail turns. Both
+ * stop where the system turns animations off. */
+@keyframes liw-breathe {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0.5;
+  }
+}
+
+.liw-progress-card.liw-busy progressbar.liw-progress > trough > progress {
+  animation: liw-breathe 1.2s ease-in-out infinite alternate;
+}
+
+.liw-status {
+  opacity: 0.8;
+}
+
+.liw-safety-note {
+  font-size: 0.92em;
+  opacity: 0.7;
 }
 
 /* ---- The steps: a simple status indicator per step ---- */
@@ -157,24 +314,6 @@ button.liw-primary.suggested-action:disabled {
  * dimmed opacity (that of .dim-label). */
 .liw-phase.liw-phase-idle > box {
   opacity: 0.55;
-}
-
-/* ---- Progress: slimmer, in the accent ---- */
-
-progressbar.liw-progress > trough {
-  min-height: 6px;
-  border-radius: 3px;
-}
-
-progressbar.liw-progress > trough > progress {
-  min-height: 6px;
-  border-radius: 3px;
-  background-color: @accent_color;
-}
-
-progressbar.liw-progress > text {
-  opacity: 0.85;
-  font-weight: bold;
 }
 
 /* ---- Result: icon, title, message ---- */

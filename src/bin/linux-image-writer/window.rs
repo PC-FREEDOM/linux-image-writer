@@ -108,6 +108,16 @@ struct State {
     target_view: Option<TargetView>,
     // The one details panel shown expanded, if any.
     open_panel: Option<Panel>,
+    // A preview's example target list, shown instead of the device list
+    // (`None` outside a preview).
+    preview_targets: Option<PreviewTargets>,
+}
+
+// A preview's target section: what it shows, and the size of the example
+// target it selects (for the write button's readiness only).
+struct PreviewTargets {
+    view: TargetView,
+    target_size: Option<u64>,
 }
 
 // One write operation, from "Write" until the user returns to the main view.
@@ -126,6 +136,9 @@ struct Operation {
     // (`WriteWorker::removal_target`, read once `Finished` has arrived),
     // `Unavailable` until then.
     removal: RemovalPresentation<RemovalTarget>,
+    // A preview's Safe Removal, shown in place of `removal`: it holds no
+    // target, so it can only be drawn (`None` outside a preview).
+    preview_removal: Option<RemovalPresentation<()>>,
 }
 
 // The operation view's widgets, built once and updated from `Operation`.
@@ -133,6 +146,10 @@ struct OperationUi {
     // The result's icon (shown once the operation has ended).
     icon: gtk::Image,
     title: gtk::Label,
+    // The progress area: the bar and its percentage, then the activity
+    // spinner and the phase detail under them.
+    progress_card: gtk::Box,
+    percent: gtk::Label,
     spinner: gtk::Spinner,
     status: gtk::Label,
     note: gtk::Label,
@@ -194,6 +211,11 @@ struct Ui {
     // The expander rows currently shown for each details panel.
     panels: RefCell<Vec<(Panel, adw::ExpanderRow)>>,
     state: RefCell<State>,
+    // A development preview (debug builds only, see preview.rs): the window
+    // shows a fixed state and refuses everything that would start real
+    // work -- writing, Safe Removal, the device list, the file chooser.
+    // Always `false` otherwise; only `present_preview` sets it.
+    preview: bool,
 }
 
 thread_local! {
@@ -203,7 +225,7 @@ thread_local! {
 // Shows the window (creating it once) and inspects `image` if given.
 pub fn present(app: &adw::Application, image: Option<PathBuf>) {
     let ui = UI.with(|slot| slot.borrow().clone()).unwrap_or_else(|| {
-        let ui = build(app);
+        let ui = build(app, false);
         UI.with(|slot| *slot.borrow_mut() = Some(ui.clone()));
         ui
     });
@@ -238,7 +260,7 @@ fn open_refused(ui: &Ui) -> Option<String> {
     result_shown.then(|| text::open_refused(false))
 }
 
-fn build(app: &adw::Application) -> Rc<Ui> {
+fn build(app: &adw::Application, preview: bool) -> Rc<Ui> {
     let image_box = section_box();
     let target_box = section_box();
     let verify_box = section_box();
@@ -287,7 +309,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let write_status = gtk::Label::builder()
         .wrap(true)
         .justify(gtk::Justification::Center)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "liw-write-status"])
         .visible(false)
         .build();
     // The standard primary style: its disabled look is plainly "not yet",
@@ -306,6 +328,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .margin_bottom(8)
         .margin_start(12)
         .margin_end(12)
+        .css_classes(["liw-write-area"])
         .build();
     bottom.append(&warning);
     bottom.append(&write_status);
@@ -360,7 +383,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             verify: VerifyState::initial(),
             target_view: None,
             open_panel: None,
+            preview_targets: None,
         }),
+        preview,
     });
 
     {
@@ -383,7 +408,10 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         // Closing the window would end the process and the write with it.
         let ui_ref = ui.clone();
         ui.window.connect_close_request(move |_| {
-            if operation_running(&ui_ref) {
+            if ui_ref.preview {
+                // Nothing runs in a preview.
+                glib::Propagation::Proceed
+            } else if operation_running(&ui_ref) {
                 // Why, in the operation's current terms (finishing or
                 // stopping the write safely, or running).
                 let (heading, body) = ui_ref
@@ -427,6 +455,161 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     ui
 }
 
+// A preview does nothing real: it says so instead. Only a debug build can
+// show a preview (its text, for developers, is not translated); a release
+// build has no preview, so nothing to say.
+fn preview_refused(ui: &Ui) {
+    #[cfg(debug_assertions)]
+    ui.toasts
+        .add_toast(adw::Toast::new("Preview: nothing is started or written"));
+    #[cfg(not(debug_assertions))]
+    let _ = ui;
+}
+
+// Shows the window in a fixed development preview state (debug builds
+// only; see preview.rs). Nothing real is started: the window is built with
+// `preview` set, so it never lists devices, opens the file chooser, starts
+// an operation or Safe Removal; the operation view draws a tracker fed
+// example events, with no worker behind it. The one real call is the
+// inspection of an empty example image file for the ready state (read
+// only, in a temporary directory removed when the preview quits).
+#[cfg(debug_assertions)]
+pub fn present_preview(app: &adw::Application, request: &crate::preview::Request) {
+    use crate::preview::{self, Scene, Theme};
+
+    if let Some(theme) = request.theme {
+        adw::StyleManager::default().set_color_scheme(match theme {
+            Theme::Light => adw::ColorScheme::ForceLight,
+            Theme::Dark => adw::ColorScheme::ForceDark,
+        });
+    }
+    let ui = build(app, true);
+    UI.with(|slot| *slot.borrow_mut() = Some(ui.clone()));
+
+    match preview::scene(request.state) {
+        Scene::Main { ready } => {
+            let target = preview::example_target();
+            let entry = EntryView {
+                index: 0,
+                title: text::device_name(&target.vendor, &target.model),
+                subtitle: format!(
+                    "{} · {} · {}",
+                    target.device,
+                    text::size(target.size),
+                    text::bus(&target.connection_bus)
+                ),
+            };
+            let protected = EntryView {
+                index: 1,
+                title: text::device_name("Example", "NVMe SSD"),
+                subtitle: format!(
+                    "nvme0n1 · {} · NVMe\n{}",
+                    text::size(1_000_000_000_000),
+                    text::protection(&[linux_image_writer::RiskReason::SystemDevice])
+                ),
+            };
+            let view = TargetView {
+                image_ready: ready,
+                loading: false,
+                failure: None,
+                cleared: None,
+                available: vec![entry],
+                too_small: Vec::new(),
+                protected: vec![protected],
+                no_available: model::NoAvailableTarget::NoUsb,
+                selected: ready.then_some(0),
+                auto: ready,
+                details: if ready {
+                    vec![
+                        (tr("Device"), target.device.clone()),
+                        (tr("Capacity"), text::exact_bytes(target.size)),
+                        (tr("Connection"), text::bus(&target.connection_bus)),
+                        (tr("Removable"), tr("Yes")),
+                    ]
+                } else {
+                    Vec::new()
+                },
+            };
+            {
+                let mut state = ui.state.borrow_mut();
+                state.discovery = Discovery::Listed;
+                state.preview_targets = Some(PreviewTargets {
+                    view,
+                    target_size: ready.then_some(target.size),
+                });
+            }
+            if ready {
+                // An empty, sparse example image: inspected like any image
+                // (read only), so the main view shows a real `ImageInfo`.
+                let dir = std::env::temp_dir().join(format!("liw-preview-{}", std::process::id()));
+                let path = dir.join(preview::IMAGE_NAME);
+                let created = std::fs::create_dir_all(&dir)
+                    .and_then(|()| std::fs::File::create(&path))
+                    .and_then(|file| file.set_len(1_800_000_000));
+                match created {
+                    Ok(()) => {
+                        app.connect_shutdown(move |_| {
+                            let _ = std::fs::remove_dir_all(&dir);
+                        });
+                        inspect(&ui, path);
+                    }
+                    Err(error) => eprintln!("preview: example image not created: {error}"),
+                }
+            }
+            render_all(&ui);
+        }
+        Scene::Operation(scene) => {
+            let scene = *scene;
+            *ui.operation.borrow_mut() = Some(Operation {
+                worker: None,
+                tracker: scene.tracker,
+                image_name: scene.image_name,
+                dialogs: Vec::new(),
+                ended: scene.ended,
+                removal: RemovalPresentation::Unavailable,
+                preview_removal: Some(RemovalPresentation::from_target(
+                    scene.removal_offered.then_some(()),
+                )),
+            });
+            ui.views.set_visible_child_name(OPERATION_VIEW);
+            render_operation(&ui);
+        }
+    }
+    ui.window.present();
+
+    if let Some(path) = request.screenshot.clone() {
+        let window = ui.window.clone();
+        let app = app.clone();
+        // Long enough for the first frames and the example inspection.
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+            match save_screenshot(&window, &path) {
+                Ok(()) => println!("preview: saved {}", path.display()),
+                Err(error) => eprintln!("preview: screenshot failed: {error}"),
+            }
+            app.quit();
+        });
+    }
+}
+
+// The window as drawn, saved as a PNG: rendered by the window's own
+// renderer, so it never captures anything but this window.
+#[cfg(debug_assertions)]
+fn save_screenshot(window: &adw::ApplicationWindow, path: &Path) -> Result<(), String> {
+    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(
+        &snapshot,
+        f64::from(window.width()),
+        f64::from(window.height()),
+    );
+    let node = snapshot.to_node().ok_or("nothing was drawn")?;
+    let renderer = window.renderer().ok_or("the window has no renderer")?;
+    renderer
+        .render_texture(&node, None)
+        .save_to_png(path)
+        .map_err(|error| error.to_string())
+}
+
 // The product name, and the brand under it, small.
 fn header_bar() -> adw::HeaderBar {
     adw::HeaderBar::builder()
@@ -434,6 +617,7 @@ fn header_bar() -> adw::HeaderBar {
             "Linux Image Writer",
             "by PC-FREEDOM",
         ))
+        .css_classes(["liw-brand"])
         .build()
 }
 
@@ -564,6 +748,10 @@ fn render_all(ui: &Rc<Ui>) {
 // ---- IMAGE ----
 
 fn choose_image(ui: &Rc<Ui>) {
+    if ui.preview {
+        preview_refused(ui);
+        return;
+    }
     let images = gtk::FileFilter::new();
     images.set_name(Some(&tr("Disk images (ISO / IMG / GZIP / XZ)")));
     for suffix in ["iso", "img", "gz", "xz"] {
@@ -768,6 +956,9 @@ fn render_image(ui: &Rc<Ui>) {
 // ---- TARGET ----
 
 fn refresh_targets(ui: &Rc<Ui>) {
+    if ui.preview {
+        return;
+    }
     {
         let mut state = ui.state.borrow_mut();
         if state.refreshing {
@@ -865,6 +1056,9 @@ struct EntryView {
 }
 
 fn target_view(state: &State) -> TargetView {
+    if let Some(preview) = &state.preview_targets {
+        return preview.view.clone();
+    }
     let context = image_context(state);
     let mut view = TargetView {
         image_ready: context != model::ImageContext::NotReady,
@@ -1066,6 +1260,7 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
             };
             if selected && !view.details.is_empty() {
                 let expander = details(&entry.title, &view.details);
+                expander.add_css_class("liw-selected");
                 expander.set_subtitle(&entry.subtitle);
                 expander.add_prefix(&prefix);
                 if let Some(note) = note {
@@ -1076,6 +1271,9 @@ fn render_targets(ui: &Rc<Ui>, force: bool) {
                 rows.append(&expander);
             } else {
                 let row = row(&entry.title, &entry.subtitle);
+                if selected {
+                    row.add_css_class("liw-selected");
+                }
                 row.add_prefix(&prefix);
                 if let Some(check) = prefix.downcast_ref::<gtk::CheckButton>() {
                     row.set_activatable_widget(Some(check));
@@ -1272,10 +1470,13 @@ fn choose_verify(ui: &Rc<Ui>, mode: VerifyMode) {
 // ---- WRITE ----
 
 fn readiness(state: &State) -> Result<(), model::WriteBlocker> {
-    let target_size = state
-        .selected
-        .and_then(|index| state.candidates.get(index))
-        .map(|candidate| candidate.size());
+    let target_size = match &state.preview_targets {
+        Some(preview) => preview.target_size,
+        None => state
+            .selected
+            .and_then(|index| state.candidates.get(index))
+            .map(|candidate| candidate.size()),
+    };
     let verify_available = state.image.info().is_some_and(|info| {
         info.verify_availability(state.verify.mode) == VerifyAvailability::Available
     });
@@ -1322,6 +1523,10 @@ fn operation_running(ui: &Ui) -> bool {
 }
 
 fn start_operation(ui: &Rc<Ui>) {
+    if ui.preview {
+        preview_refused(ui);
+        return;
+    }
     if ui.operation.borrow().is_some() {
         return;
     }
@@ -1373,6 +1578,7 @@ fn start_operation(ui: &Rc<Ui>) {
         dialogs: Vec::new(),
         ended: None,
         removal: RemovalPresentation::Unavailable,
+        preview_removal: None,
     });
     ui.views.set_visible_child_name(OPERATION_VIEW);
     render_operation(ui);
@@ -1490,6 +1696,10 @@ fn finish(ui: &Rc<Ui>, outcome: Option<OperationOutcome>) {
 // for the main view applies what the action keeps (`MainReturn`), then
 // drops the whole operation (`back_to_main`).
 fn result_action(ui: &Rc<Ui>, action: ResultAction) {
+    if ui.preview {
+        preview_refused(ui);
+        return;
+    }
     if operation_running(ui) || removal_running(ui) {
         return;
     }
@@ -1848,18 +2058,12 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .visible(false)
         .css_classes(["liw-result-icon"])
         .build();
-    let title = centered(&["title-2"]);
-    let spinner = gtk::Spinner::builder().spinning(true).build();
-    spinner.update_property(&[gtk::accessible::Property::Label(&tr("Processing"))]);
-    let status = centered(&["heading"]);
-    let status_line = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .halign(gtk::Align::Center)
-        .build();
-    status_line.append(&spinner);
-    status_line.append(&status);
-    let note = centered(&["dim-label"]);
+    // The current phase (while running) or the result (once ended).
+    let title = centered(&["title-2", "liw-headline"]);
+    // What the operation is doing in detail, and the safety note: under the
+    // progress area, quieter than it.
+    let status = centered(&["liw-status"]);
+    let note = centered(&["liw-safety-note"]);
 
     let image = centered(&["heading"]);
     image.set_wrap_mode(gtk::pango::WrapMode::WordChar);
@@ -1935,11 +2139,48 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         })
         .collect();
 
+    // The progress area: how far the whole operation is (the bar, always
+    // the fixed measured value, and its percentage), then that it is still
+    // working (the spinner, while it runs) and the phase detail.
     let progress = gtk::ProgressBar::builder()
-        .show_text(true)
+        .hexpand(true)
+        .valign(gtk::Align::Center)
         .css_classes(["liw-progress"])
         .build();
-    let amount = centered(&["dim-label", "numeric"]);
+    let percent = gtk::Label::builder()
+        .css_classes(["liw-progress-percent", "numeric"])
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    let bar_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+    bar_row.append(&progress);
+    bar_row.append(&percent);
+    let spinner = gtk::Spinner::builder()
+        .spinning(true)
+        .css_classes(["liw-activity"])
+        .build();
+    spinner.update_property(&[gtk::accessible::Property::Label(&tr("Processing"))]);
+    let amount = gtk::Label::builder()
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .css_classes(["liw-progress-detail", "numeric"])
+        .build();
+    let activity_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .build();
+    activity_row.append(&spinner);
+    activity_row.append(&amount);
+    let progress_card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .css_classes(["liw-progress-card"])
+        .build();
+    progress_card.append(&bar_row);
+    progress_card.append(&activity_row);
     let message = centered(&["liw-result-message"]);
 
     let removal = {
@@ -1987,17 +2228,19 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .margin_end(12)
         .css_classes(["liw-op"])
         .build();
+    // Read top to bottom: the phase (or result), how far, what it is
+    // doing and the safety note; a result's message and Safe Removal; then
+    // the steps and what is written where.
     for widget in [
         icon.upcast_ref::<gtk::Widget>(),
         title.upcast_ref(),
-        status_line.upcast_ref(),
+        progress_card.upcast_ref(),
+        status.upcast_ref(),
         note.upcast_ref(),
-        flow.upcast_ref(),
-        phases.upcast_ref(),
-        progress.upcast_ref(),
-        amount.upcast_ref(),
         message.upcast_ref(),
         removal.list.upcast_ref(),
+        phases.upcast_ref(),
+        flow.upcast_ref(),
         details_list.upcast_ref(),
     ] {
         content.append(widget);
@@ -2016,7 +2259,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     let cancel = gtk::Button::builder()
         .label(tr("Cancel"))
         .halign(gtk::Align::Center)
-        .css_classes(["liw-action"])
+        .css_classes(["liw-action", "liw-cancel"])
         .build();
     let bottom = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -2067,6 +2310,8 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         OperationUi {
             icon,
             title,
+            progress_card,
+            percent,
             spinner,
             status,
             note,
@@ -2086,20 +2331,27 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     )
 }
 
-// Shows the overall progress on the bar: its fixed value as text, and
-// either that value as the fill or, while `busy`, a pulse.
-fn show_overall(bar: &gtk::ProgressBar, overall: OverallProgress, phase: &str) {
+// Shows the overall progress: the bar and its percentage at the measured
+// value (never animated towards anything), the spinner while the operation
+// is `working`, and the "busy" mark where the value cannot move although
+// work continues (the bar's fill then breathes, as far as the system allows
+// animations).
+fn show_overall(op: &OperationUi, overall: OverallProgress, phase: &str, working: bool) {
     let percent = format!("{}%", overall.percent());
-    if overall.busy {
-        bar.pulse();
-    } else {
-        bar.set_fraction(overall.fraction);
-    }
-    bar.set_text(Some(&percent));
-    bar.update_property(&[gtk::accessible::Property::Label(&format!(
-        "{phase} {percent}"
-    ))]);
-    bar.set_visible(true);
+    op.progress.set_fraction(overall.fraction);
+    op.percent.set_text(&percent);
+    set_style(
+        &op.progress_card,
+        &["liw-busy"],
+        (working && overall.busy).then_some("liw-busy"),
+    );
+    op.spinner.set_visible(working);
+    op.spinner.set_spinning(working);
+    op.progress
+        .update_property(&[gtk::accessible::Property::Label(&format!(
+            "{phase} {percent}"
+        ))]);
+    op.progress_card.set_visible(true);
 }
 
 fn render_operation(ui: &Ui) {
@@ -2121,7 +2373,10 @@ fn render_operation(ui: &Ui) {
     let view = operation
         .ended
         .as_ref()
-        .and_then(|(ending, _)| result::view(*ending, tracker.verify_mode, &operation.removal));
+        .and_then(|(ending, _)| match &operation.preview_removal {
+            Some(removal) => result::view(*ending, tracker.verify_mode, removal),
+            None => result::view(*ending, tracker.verify_mode, &operation.removal),
+        });
 
     // The same row of steps while running and on the result: where each
     // step is now, or how it ended.
@@ -2160,16 +2415,17 @@ fn render_operation(ui: &Ui) {
             op.title.set_text(&headline);
             op.status.set_text(&status);
             op.status.set_visible(!status.is_empty());
-            op.spinner.set_visible(!status.is_empty());
             op.note.set_text(&note);
             op.note.set_visible(!note.is_empty());
             // The bar is the whole operation's progress
-            // (`Tracker::overall`). Where the value cannot move although
-            // work continues (finishing, stopping, waiting for the first
-            // write-back confirmation), it pulses -- this runs on every
-            // worker poll -- with the fixed value still in its text.
+            // (`Tracker::overall`), always its measured value. That work
+            // continues is the spinner's (not while waiting for the user's
+            // confirmation); where the value cannot move although work
+            // continues (finishing, stopping, waiting for the first
+            // write-back confirmation) the bar is also marked busy.
             if let Some(overall) = progress::shown(tracker, None) {
-                show_overall(&op.progress, overall, &headline);
+                let working = tracker.activity != operation::Activity::AwaitingConfirmation;
+                show_overall(op, overall, &headline, working);
             }
             let detail = text::phase_detail(tracker);
             op.amount.set_text(detail.as_deref().unwrap_or_default());
@@ -2191,15 +2447,12 @@ fn render_operation(ui: &Ui) {
             op.icon.set_visible(true);
             op.title.set_text(&text::result_title(view.case));
             op.status.set_visible(false);
-            op.spinner.set_visible(false);
             op.note.set_visible(false);
             // 100% only for a completed operation; a cancelled or failed
             // one shows no progress at all.
             match progress::shown(tracker, operation.ended.as_ref().map(|(ending, _)| *ending)) {
-                Some(overall) => {
-                    show_overall(&op.progress, overall, &text::result_title(view.case))
-                }
-                None => op.progress.set_visible(false),
+                Some(overall) => show_overall(op, overall, &text::result_title(view.case), false),
+                None => op.progress_card.set_visible(false),
             }
             op.amount.set_visible(false);
             op.message.set_text(&text::result_message(view.case));
@@ -2396,5 +2649,35 @@ fn set_style(widget: &impl IsA<gtk::Widget>, classes: &[&str], class: Option<&st
     }
     if let Some(class) = class {
         widget.add_css_class(class);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Every app-specific style class the window sets (`liw-…`) is defined
+    // in the stylesheet: the look lives in style.css, not in the code, and
+    // a class with no rule is a typo.
+    #[test]
+    fn every_style_class_is_defined() {
+        let code = include_str!("window.rs");
+        let code = &code[..code.find("\n#[cfg(test)]\nmod tests {").unwrap()];
+        let css = include_str!("style.css");
+        let mut classes: Vec<&str> = code
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            // Class names only (not, say, the preview's `liw-preview-{pid}` directory).
+            .filter(|literal| {
+                literal.starts_with("liw-")
+                    && literal.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+                    && !literal.ends_with('-')
+            })
+            .collect();
+        classes.sort();
+        classes.dedup();
+        assert!(classes.len() >= 15, "{classes:?}");
+        for class in classes {
+            assert!(css.contains(&format!(".{class}")), "no rule for {class}");
+        }
     }
 }

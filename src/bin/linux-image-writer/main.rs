@@ -21,11 +21,14 @@
 // outcome.
 //
 //   linux-image-writer [image]   (an image given here is inspected at start)
+//   linux-image-writer --preview <state>   (debug builds only: preview.rs)
 
 mod expansion;
 mod i18n;
 mod model;
 mod operation;
+#[cfg(debug_assertions)]
+mod preview;
 mod progress;
 mod result;
 mod text;
@@ -41,6 +44,20 @@ const APP_ID: &str = "io.github.pc_freedom.linux-image-writer";
 
 fn main() -> glib::ExitCode {
     i18n::init();
+    // Development builds only: `--preview <state>` shows a fixed window
+    // state and nothing else (preview.rs). Not compiled into a release.
+    #[cfg(debug_assertions)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        match preview::request_from_args(&args) {
+            Ok(Some(request)) => return run_preview(request),
+            Ok(None) => {}
+            Err(message) => {
+                eprintln!("{message}");
+                return glib::ExitCode::FAILURE;
+            }
+        }
+    }
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
@@ -51,6 +68,19 @@ fn main() -> glib::ExitCode {
         window::present(app, files.first().and_then(|file| file.path()));
     });
     app.run()
+}
+
+// A preview runs as its own, non-unique instance (never handing over to, or
+// taking over, a running Linux Image Writer) with no command-line files.
+#[cfg(debug_assertions)]
+fn run_preview(request: preview::Request) -> glib::ExitCode {
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.connect_startup(|_| load_style());
+    app.connect_activate(move |app| window::present_preview(app, &request));
+    app.run_with_args::<&str>(&[])
 }
 
 // The app's own look (style.css), over libadwaita's, and its dark palette
