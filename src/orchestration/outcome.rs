@@ -8,8 +8,8 @@ use super::operation::{ConfirmError, PrepareImageError, TargetNotReady};
 use crate::execution::core::{VerifyTargetDiagnostics, WriteGateError};
 use crate::execution::linux_access::OpenDeviceError;
 use crate::execution::write_job::{
-    Cancelled as WriteCancelled, Failed, ImageBindingError, VerifyCancelled, VerifyFailed,
-    VerifyStartError, VerifySucceeded,
+    CancelDrainFailed, Cancelled as WriteCancelled, Failed, ImageBindingError, VerifyCancelled,
+    VerifyFailed, VerifyStartError, VerifySucceeded,
 };
 
 /// How a write operation ended.
@@ -36,7 +36,9 @@ pub enum CancelledAt {
     BeforeConfirmation,
     // While the user was being asked to confirm.
     Confirmation,
-    // During the write (the writer's own check, once per chunk).
+    // During the write (the writer's own check, once per chunk). Reported
+    // only once the cancelled write was drained (`fdatasync`) and its FD
+    // closed.
     Write {
         cancelled: WriteCancelled,
         image_size: u64,
@@ -79,6 +81,17 @@ pub enum OperationError {
         failed: Failed,
         image_size: u64,
     },
+    // The write was cancelled, but writing back the data already handed to
+    // the kernel failed (`CancelDrain::drain()`): the target is partially
+    // overwritten and what reached it is unknown. A failure, not a
+    // `Cancelled`, so it is never reported as a clean cancellation.
+    CancelDrain {
+        failed: CancelDrainFailed,
+        image_size: u64,
+    },
+    // The worker draining a cancelled write panicked; the FD was closed
+    // while unwinding, and the write-back is not confirmed.
+    CancelDrainWorkerPanicked,
     // The sync worker panicked: durability is not confirmed.
     SyncWorkerPanicked {
         cancel_requested: bool,

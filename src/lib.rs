@@ -258,8 +258,9 @@ pub mod report {
         AuthorizationDenial, DirectReadSetupError, FdMetadata, OpenDeviceError,
     };
     pub use crate::execution::write_job::{
-        Cancelled, Failed, ImageBindingError, VerifyCancelled, VerifyFailed, VerifyFailureReason,
-        VerifyProgress, VerifyStartError, VerifySucceeded, WriteJobFailureCause, WriteStage,
+        CancelDrainFailed, Cancelled, Failed, ImageBindingError, VerifyCancelled, VerifyFailed,
+        VerifyFailureReason, VerifyProgress, VerifyStartError, VerifySucceeded,
+        WriteJobFailureCause, WriteStage,
     };
     pub use crate::identity::{IdentityComparison, InstanceComparison};
     pub use crate::image_source::compressed::{PreflightError, PreflightProgress, ReplayFailure};

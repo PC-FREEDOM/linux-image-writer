@@ -197,9 +197,12 @@ pub(crate) fn removal_allowed(outcome: &OperationOutcome) -> bool {
             | OperationError::WriteDeviceRejected { .. }
             | OperationError::ImageBinding(_)
             | OperationError::ReaderOpen(_) => false,
-            OperationError::Write { .. } | OperationError::Sync { .. } => true,
+            OperationError::Write { .. }
+            | OperationError::CancelDrain { .. }
+            | OperationError::Sync { .. } => true,
             // A panic is not followed by further device operations.
-            OperationError::SyncWorkerPanicked { .. } => false,
+            OperationError::CancelDrainWorkerPanicked
+            | OperationError::SyncWorkerPanicked { .. } => false,
             OperationError::VerifyNotStarted(not_started) => match not_started {
                 VerifyNotStarted::TestPauseEnded => false,
                 // Verify's own re-check found the target changed.
@@ -517,8 +520,9 @@ pub(super) mod tests {
     use crate::device::BlockFilesystem;
     use crate::execution::core::{VerifyMode, WriteGateError};
     use crate::execution::write_job::{
-        CancelReason, Cancelled, Failed, ImageBindingError, VerifyCancelled, VerifyFailed,
-        VerifyFailureReason, VerifyStartError, VerifySucceeded, WriteJobFailureCause, WriteStage,
+        CancelDrainFailed, CancelReason, Cancelled, Failed, ImageBindingError, VerifyCancelled,
+        VerifyFailed, VerifyFailureReason, VerifyStartError, VerifySucceeded, WriteJobFailureCause,
+        WriteStage,
     };
     use crate::identity::{IdentityComparison, InstanceComparison};
     use crate::image_source::ImageSourceError;
@@ -1500,6 +1504,26 @@ pub(super) mod tests {
                 true,
             ),
             (
+                "Failed CancelDrain",
+                F(OperationError::CancelDrain {
+                    failed: CancelDrainFailed {
+                        image_size: 10,
+                        bytes_written: 5,
+                        reason: CancelReason::UserRequested,
+                        target_may_be_modified: true,
+                        retry_requires_fresh_gate: true,
+                        error: io::Error::other("EIO"),
+                    },
+                    image_size: 10,
+                }),
+                true,
+            ),
+            (
+                "Failed CancelDrainWorkerPanicked",
+                F(OperationError::CancelDrainWorkerPanicked),
+                false,
+            ),
+            (
                 "Failed SyncWorkerPanicked",
                 F(OperationError::SyncWorkerPanicked {
                     cancel_requested: false,
@@ -1590,6 +1614,6 @@ pub(super) mod tests {
     // keeps the table here complete as well).
     #[test]
     fn the_outcome_table_covers_every_variant() {
-        assert_eq!(every_outcome().len(), 27);
+        assert_eq!(every_outcome().len(), 29);
     }
 }

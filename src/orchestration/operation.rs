@@ -42,8 +42,8 @@ use crate::execution::core::{
 };
 use crate::execution::linux_access::OpenAccess;
 use crate::execution::write_job::{
-    AuthorizedExecution, CancelHandle, ImageBindingError, SyncAttemptOutcome, VerifyOutcome,
-    VerifyStart, WriteAttemptOutcome,
+    AuthorizedExecution, CancelDrainOutcome, CancelHandle, ImageBindingError, SyncAttemptOutcome,
+    VerifyOutcome, VerifyStart, WriteAttemptOutcome,
 };
 use crate::image_source::compressed::PreflightError;
 use crate::image_source::{self, ImageSource, ImageSourceError, OpenedImage, SelectedImage};
@@ -544,11 +544,33 @@ pub(super) fn run_on(
                 image_size: image.logical_size(),
             });
         }
-        WriteAttemptOutcome::Cancelled(cancelled) => {
-            return Cancelled(CancelledAt::Write {
-                cancelled,
-                image_size: image.logical_size(),
+        // ---- cancelled: drain on the still-open FD, then close it ----
+        // Like sync: on a worker thread, awaited to completion, never
+        // skipped. `Cancelled` is returned only after the FD is closed.
+        WriteAttemptOutcome::CancelRequested(drain) => {
+            observer.on_event(OperationEvent::CancelDrainStarted {
+                bytes_written: drain.bytes_written,
             });
+            let drained = match run_off_main_thread(drain, |drain| drain.drain()) {
+                OffMainThread::Finished(outcome) => outcome,
+                OffMainThread::NotStarted(drain, error) => {
+                    observer.on_event(OperationEvent::CancelDrainOnCallingThread { error: &error });
+                    drain.drain()
+                }
+                OffMainThread::Panicked => {
+                    return Failed(OperationError::CancelDrainWorkerPanicked);
+                }
+            };
+            return match drained {
+                CancelDrainOutcome::Drained(cancelled) => Cancelled(CancelledAt::Write {
+                    cancelled,
+                    image_size: image.logical_size(),
+                }),
+                CancelDrainOutcome::Failed(failed) => Failed(OperationError::CancelDrain {
+                    failed,
+                    image_size: image.logical_size(),
+                }),
+            };
         }
     };
     observer.on_event(OperationEvent::WriteSucceeded {
@@ -1721,17 +1743,27 @@ mod tests {
         let mut observer = TestObserver::answering("/dev/sdx");
         observer.cancel_on = Some(("WriteProgress", cancel.clone()));
 
-        match run(&platform, &image, VerifyMode::Full, &cancel, &mut observer) {
+        let bytes_written = match run(&platform, &image, VerifyMode::Full, &cancel, &mut observer) {
             OperationOutcome::Cancelled(CancelledAt::Write {
                 cancelled,
                 image_size,
             }) => {
                 assert!(cancelled.bytes_written < data.len() as u64);
                 assert_eq!(image_size, data.len() as u64);
+                cancelled.bytes_written
             }
             other => panic!("{other:?}"),
-        }
+        };
+        // The cancelled write is drained (and its FD closed) before the
+        // outcome: the drain is the last thing announced, and what the
+        // writer handed over is on the target.
+        assert_eq!(
+            observer.events.last().map(String::as_str),
+            Some("CancelDrainStarted")
+        );
+        assert!(!observer.saw("WriteSucceeded"));
         assert!(!observer.saw("SyncStarted"));
+        assert_eq!(contents(&target), data[..bytes_written as usize]);
         assert_eq!(platform.opens(), [OpenAccess::WriteExclusive]);
     }
 

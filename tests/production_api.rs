@@ -136,6 +136,8 @@ fn describe_event(event: &WorkerEvent) -> &'static str {
         WorkerEvent::WriteStarted => "write",
         WorkerEvent::WriteProgress(_) => "write progress",
         WorkerEvent::WriteSucceeded { .. } => "written",
+        WorkerEvent::CancelDrainStarted { .. } => "cancel drain",
+        WorkerEvent::CancelDrainOnCallingThread { .. } => "cancel drain here",
         WorkerEvent::SyncStarted => "sync",
         WorkerEvent::SyncOnCallingThread { .. } => "sync here",
         WorkerEvent::SyncSucceeded { .. } => "synced",
@@ -175,6 +177,8 @@ fn describe_outcome(outcome: &OperationOutcome) -> &'static str {
             | OperationError::ImageBinding(_)
             | OperationError::ReaderOpen(_)
             | OperationError::Write { .. }
+            | OperationError::CancelDrain { .. }
+            | OperationError::CancelDrainWorkerPanicked
             | OperationError::SyncWorkerPanicked { .. }
             | OperationError::Sync { .. }
             | OperationError::Verify { .. } => "failed",

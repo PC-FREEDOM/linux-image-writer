@@ -94,6 +94,18 @@ pub(crate) enum OperationEvent<'a> {
         bytes_written: u64,
         image_size: u64,
     },
+    // The write stopped at a cancellation; the data already handed to the
+    // kernel is now being written back on the still-open FD (O_EXCL held),
+    // before the FD is closed. Not cancellable; the outcome follows once
+    // it is done.
+    CancelDrainStarted {
+        bytes_written: u64,
+    },
+    // No worker thread could be started for the drain; it runs on the
+    // calling thread instead (it is never skipped).
+    CancelDrainOnCallingThread {
+        error: &'a std::io::Error,
+    },
     SyncStarted,
     // No worker thread could be started for sync; it runs on the calling
     // thread instead (it is never skipped).

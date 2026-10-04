@@ -212,6 +212,11 @@ impl Tracker {
                     total: *image_size,
                 });
             }
+            // The write stopped at a cancellation, whoever requested it; it
+            // is shown as cancelling until the drain ends and the outcome
+            // arrives (the drain cannot be interrupted).
+            WorkerEvent::CancelDrainStarted { .. }
+            | WorkerEvent::CancelDrainOnCallingThread { .. } => self.cancel_requested = true,
             WorkerEvent::SyncStarted
             | WorkerEvent::SyncOnCallingThread { .. }
             | WorkerEvent::SyncSucceeded { .. } => self.activity = Activity::Syncing,
@@ -466,6 +471,16 @@ fn failure(error: &OperationError) -> Ending {
             },
             target_modified: failed.target_may_be_modified,
         },
+        // Cancelled, but the pending data could not be written back: shown
+        // as a failed write, never as a clean cancellation.
+        OperationError::CancelDrain { failed, .. } => Ending::WriteFailed {
+            reason: Reason::SyncError,
+            target_modified: failed.target_may_be_modified,
+        },
+        OperationError::CancelDrainWorkerPanicked => Ending::WriteFailed {
+            reason: Reason::SyncError,
+            target_modified: true,
+        },
         OperationError::SyncWorkerPanicked { .. } => Ending::WriteFailed {
             reason: Reason::SyncError,
             target_modified: true,
@@ -618,9 +633,9 @@ fn selection_state(state: &SelectionState) -> String {
 mod tests {
     use super::*;
     use linux_image_writer::report::{
-        Cancelled, CompressedImageRejection, Failed, PreflightError, PreflightProgress,
-        VerifyCancelled, VerifyFailed, VerifyProgress, VerifySucceeded, WriteJobFailureCause,
-        WriteProgress, WriteStage,
+        CancelDrainFailed, Cancelled, CompressedImageRejection, Failed, PreflightError,
+        PreflightProgress, VerifyCancelled, VerifyFailed, VerifyProgress, VerifySucceeded,
+        WriteJobFailureCause, WriteProgress, WriteStage,
     };
     use linux_image_writer::{CancelReason, RiskLevel, SafetyAssessment};
     use std::io;
@@ -823,6 +838,21 @@ mod tests {
         assert_eq!(tracker.cancel_action(), CancelAction::AskFirst);
     }
 
+    // A cancelled write being drained shows as cancelling (whoever asked
+    // for the cancellation) and offers no further cancel.
+    #[test]
+    fn cancel_drain_shows_cancelling_and_hides_cancel() {
+        let mut tracker = Tracker::new(VerifyMode::Quick);
+        tracker.confirmation_requested();
+        tracker.answered(true);
+        tracker.apply(&WorkerEvent::WriteStarted);
+        assert!(!tracker.cancel_requested);
+        tracker.apply(&WorkerEvent::CancelDrainStarted { bytes_written: 7 });
+        assert!(tracker.cancel_requested);
+        assert_eq!(tracker.cancel_action(), CancelAction::Unavailable);
+        assert_eq!(tracker.step(), Step::Write);
+    }
+
     #[test]
     fn cancel_during_verify_is_immediate() {
         let mut tracker = through_write(VerifyMode::Full);
@@ -966,6 +996,39 @@ mod tests {
         });
         assert_eq!(
             ending(&outcome),
+            Ending::WriteFailed {
+                reason: Reason::SyncError,
+                target_modified: true
+            }
+        );
+    }
+
+    // A cancelled write whose pending data could not be written back is a
+    // failed write, never a clean cancellation.
+    #[test]
+    fn failed_cancel_drain_is_a_write_failure() {
+        let outcome = OperationOutcome::Failed(OperationError::CancelDrain {
+            failed: CancelDrainFailed {
+                image_size: 1000,
+                bytes_written: 300,
+                reason: CancelReason::UserRequested,
+                target_may_be_modified: true,
+                retry_requires_fresh_gate: true,
+                error: io::Error::other("EIO"),
+            },
+            image_size: 1000,
+        });
+        assert_eq!(
+            ending(&outcome),
+            Ending::WriteFailed {
+                reason: Reason::SyncError,
+                target_modified: true
+            }
+        );
+        assert_eq!(
+            ending(&OperationOutcome::Failed(
+                OperationError::CancelDrainWorkerPanicked
+            )),
             Ending::WriteFailed {
                 reason: Reason::SyncError,
                 target_modified: true

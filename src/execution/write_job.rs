@@ -35,7 +35,11 @@
 //   Writing<R>
 //       |  (write(self): consumes Writing, calls writer::write() exactly once)
 //       v
-//   WriteSucceeded   |   Failed   |   Cancelled
+//   WriteSucceeded   |   Failed   |   CancelDrain
+//       |                             |  (drain(self): fdatasync on the still-open
+//       |                             |   write FD, then close it -- see `CancelDrain`)
+//       |                             v
+//       |                         Cancelled   |   CancelDrainFailed
 //       |  (begin_sync(self): consumes WriteSucceeded)
 //       v
 //   Syncing
@@ -142,6 +146,7 @@ use super::core::{
 };
 use super::linux_access::{
     DirectReadGeometry, DirectReadSetupError, DirectReadTarget, FdMetadata, OpenedDeviceHandle,
+    SyncTarget,
 };
 use crate::device::{DeviceSnapshot, SnapshotFetchOutcome};
 use crate::image_source::source_identity::SourceChanged;
@@ -355,9 +360,13 @@ pub struct Failed {
     pub retry_requires_fresh_gate: bool,
 }
 
-// `WriteError::Cancelled` becomes a `Cancelled`, tagged with why (as best
-// `CancelHandle` can tell -- see `CancelHandle::reason()`). Same
-// `retry_requires_fresh_gate` rationale as `Failed`.
+// A cancelled write whose FD has been drained and closed: the only way to
+// get one is `CancelDrain::drain()` (below), so holding a `Cancelled` means
+// the cancellation is complete -- no new write is issued, the writes
+// already handed to the kernel were waited for, and the write FD (and with
+// it the O_EXCL claim) is gone. Tagged with why (as best `CancelHandle` can
+// tell -- see `CancelHandle::reason()`). Same `retry_requires_fresh_gate`
+// rationale as `Failed`.
 #[derive(Debug)]
 pub struct Cancelled {
     pub image_size: u64,
@@ -407,11 +416,123 @@ impl std::fmt::Debug for WriteSucceeded {
     }
 }
 
+// `WriteError::Cancelled` becomes a `CancelDrain`: the writer stopped
+// issuing writes, but the attempt is not over. Writes already accepted by
+// the kernel may still be pending in the page cache, and closing the FD
+// right here would make that close wait for all of them, in the kernel and
+// out of sight (`bdev_release()` writes the device back on its last close).
+// So the write FD (`active`) moves here instead of being dropped, still
+// open and still holding its O_EXCL claim, and `drain()` writes the pending
+// data back explicitly before closing it. Only `drain()` turns this into a
+// `Cancelled` (or a `CancelDrainFailed`); there is no other way to reach
+// either, so a cancellation can never be reported as finished before the
+// FD is closed.
+pub struct CancelDrain {
+    pub image_size: u64,
+    pub bytes_written: u64,
+    pub reason: CancelReason,
+    pub target_may_be_modified: bool,
+    active: ActiveWrite,
+}
+
+impl std::fmt::Debug for CancelDrain {
+    // `ActiveWrite` has no `Debug` impl (see `core.rs`), so this is written
+    // by hand, exactly like `WriteSucceeded`'s.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelDrain")
+            .field("image_size", &self.image_size)
+            .field("bytes_written", &self.bytes_written)
+            .field("reason", &self.reason)
+            .field("target_may_be_modified", &self.target_may_be_modified)
+            .finish_non_exhaustive()
+    }
+}
+
+// The cancellation was requested and carried out (no new write was issued
+// after it), but writing back the data already handed to the kernel failed.
+// Deliberately not a `Cancelled`: the cancel itself happened, yet what
+// reached the target is unknown. `target_may_be_modified` follows the same
+// rule as `Cancelled`'s (any byte handed to the kernel counts); the FD is
+// closed by the time this exists.
+#[derive(Debug)]
+pub struct CancelDrainFailed {
+    pub image_size: u64,
+    pub bytes_written: u64,
+    pub reason: CancelReason,
+    pub target_may_be_modified: bool,
+    pub retry_requires_fresh_gate: bool,
+    pub error: io::Error,
+}
+
+#[derive(Debug)]
+pub enum CancelDrainOutcome {
+    Drained(Cancelled),
+    Failed(CancelDrainFailed),
+}
+
+impl CancelDrain {
+    // Consumes this `CancelDrain`: `fdatasync()` on the still-open write FD,
+    // then closes it, then reports. The order is the point:
+    //
+    //   1. The pending writes are written back while this process still
+    //      holds the FD -- so the O_EXCL claim on the whole disk stays in
+    //      place for the whole wait, whatever else has the device open
+    //      (the kernel's own write-back on close is skipped, and the claim
+    //      released first, when another opener is present).
+    //   2. The FD is closed explicitly; the pending data is already
+    //      written back, so the close has little left to wait for.
+    //   3. Only then is the outcome built.
+    //
+    // Blocking and not cancellable (a single syscall, like
+    // `Syncing::sync()`); the caller runs it on a worker thread. The FD is
+    // closed whether or not the sync succeeded.
+    pub fn drain(self) -> CancelDrainOutcome {
+        self.drain_with(|target| target.sync_data())
+    }
+
+    // `drain()` with the sync step supplied, so tests can observe the FD
+    // during it and inject a failure (a real `fdatasync()` on a temporary
+    // file does not fail on demand).
+    fn drain_with(self, sync: impl FnOnce(SyncTarget<'_>) -> io::Result<()>) -> CancelDrainOutcome {
+        let CancelDrain {
+            image_size,
+            bytes_written,
+            reason,
+            target_may_be_modified,
+            active,
+        } = self;
+
+        let synced = sync(active.sync_target());
+        // Close the write FD (and release its O_EXCL claim) only now.
+        drop(active);
+
+        match synced {
+            Ok(()) => CancelDrainOutcome::Drained(Cancelled {
+                image_size,
+                bytes_written,
+                reason,
+                target_may_be_modified,
+                retry_requires_fresh_gate: true,
+            }),
+            Err(error) => CancelDrainOutcome::Failed(CancelDrainFailed {
+                image_size,
+                bytes_written,
+                reason,
+                target_may_be_modified,
+                retry_requires_fresh_gate: true,
+                error,
+            }),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WriteAttemptOutcome {
     Succeeded(WriteSucceeded),
     Failed(Failed),
-    Cancelled(Cancelled),
+    // Cancellation was observed; the FD still has to be drained and closed
+    // (`CancelDrain::drain()`) before the cancellation is complete.
+    CancelRequested(CancelDrain),
 }
 
 // One write attempt's execution state: the result of consuming an
@@ -685,16 +806,17 @@ impl WritingExecution {
     // for a second, verify-time reader (see `WritingExecution`'s own doc
     // comment for why that matters). `WriteAttemptOutcome` is returned
     // exactly as `Writing::write()` already produces it --
-    // `Succeeded`/`Failed`/`Cancelled` keep their existing fields and
+    // `Succeeded`/`Failed`/`CancelRequested` keep their existing fields and
     // meaning unchanged; this method does not interpret, wrap, or summarize
     // it further.
     //
     // Returns no `ActiveWrite`/`ActiveWriteTarget`/`OpenedDeviceHandle`/raw
     // fd/`dyn Write`: this method exposes nothing beyond what
     // `WriteAttemptOutcome`'s existing variants already choose to expose
-    // (`Failed`/`Cancelled` do not carry `active` at all; `WriteSucceeded`
-    // keeps it private with no accessor). The Raw Write Capability Boundary
-    // (`pub(in crate::execution)` on `ActiveWrite::writer_target()` etc.) is
+    // (`Failed` does not carry `active` at all; `WriteSucceeded` and
+    // `CancelDrain` keep it private with no accessor). The Raw Write
+    // Capability Boundary (`pub(in crate::execution)` on
+    // `ActiveWrite::writer_target()` etc.) is
     // therefore unaffected by adding this method.
     //
     // Source gate: immediately before the first byte is written, the source
@@ -814,13 +936,16 @@ impl<R: Read> Writing<R> {
                 verify_mode,
                 active,
             }),
+            // The FD is not dropped here: it moves into `CancelDrain`, still
+            // open, so the pending writes are drained explicitly before it
+            // is closed (see `CancelDrain`).
             Err(WriteError::Cancelled { bytes_written }) => {
-                WriteAttemptOutcome::Cancelled(Cancelled {
+                WriteAttemptOutcome::CancelRequested(CancelDrain {
                     image_size: plan.image_size,
                     bytes_written,
                     reason: cancel.reason(),
                     target_may_be_modified: bytes_written > 0,
-                    retry_requires_fresh_gate: true,
+                    active,
                 })
             }
             Err(error) => {
@@ -2101,8 +2226,8 @@ mod tests {
         let outcome = writing.write(|_| {});
 
         let cancelled = match outcome {
-            WriteAttemptOutcome::Cancelled(c) => c,
-            other => panic!("expected Cancelled, got {other:?}"),
+            WriteAttemptOutcome::CancelRequested(drain) => drained(drain),
+            other => panic!("expected CancelRequested, got {other:?}"),
         };
 
         assert_eq!(cancelled.bytes_written, 0);
@@ -2137,13 +2262,158 @@ mod tests {
         });
 
         let cancelled = match outcome {
-            WriteAttemptOutcome::Cancelled(c) => c,
-            other => panic!("expected Cancelled, got {other:?}"),
+            WriteAttemptOutcome::CancelRequested(drain) => drained(drain),
+            other => panic!("expected CancelRequested, got {other:?}"),
         };
 
         assert!(cancelled.bytes_written > 0);
         assert!(cancelled.bytes_written < image_size);
         assert!(cancelled.target_may_be_modified);
+    }
+
+    // Runs `drain()` on a `CancelDrain` the way the operation does and
+    // expects it to succeed (on a temporary file, `fdatasync()` does).
+    fn drained(drain: CancelDrain) -> Cancelled {
+        match drain.drain() {
+            CancelDrainOutcome::Drained(cancelled) => cancelled,
+            other => panic!("expected Drained, got {other:?}"),
+        }
+    }
+
+    // A write cancelled after its first chunk (so data was handed to the
+    // kernel), as the `CancelDrain` it returns. The fd number and its
+    // /proc target are captured while the FD is still open.
+    fn cancelled_partway(tag: &str) -> (CancelDrain, std::os::fd::RawFd, Option<String>) {
+        let image_size = 3 * writer::DEFAULT_CHUNK_SIZE as u64;
+        let (_path, authorized) = gate_pass_active_write(tag, image_size, image_size, false);
+        let cancel = CancelHandle::new();
+        let writing = start_inner(
+            authorized,
+            Cursor::new(vec![4u8; image_size as usize]),
+            cancel.clone(),
+        );
+
+        let outcome = writing.write(|_| cancel.request_cancel(CancelReason::UserRequested));
+        let drain = match outcome {
+            WriteAttemptOutcome::CancelRequested(drain) => drain,
+            other => panic!("expected CancelRequested, got {other:?}"),
+        };
+        let raw_fd = drain.active.raw_fd_for_test();
+        let target = crate::execution::linux_access::fd_proc_target_for_test(raw_fd);
+        (drain, raw_fd, target)
+    }
+
+    // Cancel drain 1. Detecting the cancellation does not close the write
+    // FD: `Writing::write()` hands it on, open, inside `CancelDrain`, with
+    // the cancellation's facts.
+    #[test]
+    fn cancel_keeps_the_write_fd_open_in_cancel_drain() {
+        let (drain, raw_fd, target) = cancelled_partway("cancel-drain-open");
+
+        assert!(
+            target.is_some(),
+            "the write fd must still be open once the cancellation was detected"
+        );
+        assert_eq!(drain.bytes_written, writer::DEFAULT_CHUNK_SIZE as u64);
+        assert_eq!(drain.reason, CancelReason::UserRequested);
+        assert!(drain.target_may_be_modified);
+
+        drop(drain);
+        crate::execution::linux_access::assert_fd_closed_for_test(raw_fd, target.as_deref());
+    }
+
+    // Cancel drain 2-4. `drain()` runs the sync step on the still-open FD,
+    // closes the FD only after it, and builds `Cancelled` only after the
+    // close: by the time the outcome exists, the FD is gone.
+    #[test]
+    fn drain_syncs_on_the_open_fd_then_closes_it_before_reporting_cancelled() {
+        let (drain, raw_fd, target) = cancelled_partway("cancel-drain-order");
+
+        let mut fd_open_during_sync = None;
+        let outcome = drain.drain_with(|sync_target| {
+            fd_open_during_sync =
+                Some(crate::execution::linux_access::fd_proc_target_for_test(raw_fd) == target);
+            sync_target.sync_data()
+        });
+
+        assert_eq!(
+            fd_open_during_sync,
+            Some(true),
+            "the sync step must run, on the write fd while it is still open"
+        );
+        crate::execution::linux_access::assert_fd_closed_for_test(raw_fd, target.as_deref());
+
+        let cancelled = match outcome {
+            CancelDrainOutcome::Drained(cancelled) => cancelled,
+            other => panic!("expected Drained, got {other:?}"),
+        };
+        assert_eq!(cancelled.bytes_written, writer::DEFAULT_CHUNK_SIZE as u64);
+        assert_eq!(cancelled.reason, CancelReason::UserRequested);
+        assert!(cancelled.target_may_be_modified);
+        assert!(cancelled.retry_requires_fresh_gate);
+    }
+
+    // Cancel drain 4 (production path). `drain()` itself -- the real
+    // `fdatasync()` -- also closes the FD before returning `Cancelled`.
+    #[test]
+    fn drain_closes_the_write_fd() {
+        let (drain, raw_fd, target) = cancelled_partway("cancel-drain-close");
+
+        let cancelled = drained(drain);
+
+        crate::execution::linux_access::assert_fd_closed_for_test(raw_fd, target.as_deref());
+        assert!(cancelled.target_may_be_modified);
+    }
+
+    // Cancel drain 5. A failed sync is not reported as `Cancelled`: it
+    // becomes `CancelDrainFailed`, carrying the error and the cancellation's
+    // facts (the target may be modified), and the FD is closed all the same.
+    #[test]
+    fn failed_drain_is_reported_as_cancel_drain_failed_not_cancelled() {
+        let (drain, raw_fd, target) = cancelled_partway("cancel-drain-fail");
+
+        let outcome = drain.drain_with(|_| Err(io::Error::other("simulated fdatasync failure")));
+
+        crate::execution::linux_access::assert_fd_closed_for_test(raw_fd, target.as_deref());
+        let failed = match outcome {
+            CancelDrainOutcome::Failed(failed) => failed,
+            other => panic!("expected Failed, got {other:?}"),
+        };
+        assert_eq!(failed.error.to_string(), "simulated fdatasync failure");
+        assert_eq!(failed.bytes_written, writer::DEFAULT_CHUNK_SIZE as u64);
+        assert_eq!(failed.reason, CancelReason::UserRequested);
+        assert!(failed.target_may_be_modified);
+        assert!(failed.retry_requires_fresh_gate);
+    }
+
+    // Cancel drain 6. A cancellation before the first chunk still goes
+    // through the drain (nothing is pending, so it is quick) and still
+    // reports the target as untouched.
+    #[test]
+    fn cancel_before_any_chunk_drains_and_keeps_target_untouched() {
+        let (_path, authorized) = gate_pass_active_write("cancel-drain-none", 100, 200, false);
+        let cancel = CancelHandle::new();
+        cancel.request_cancel(CancelReason::DeviceLost);
+        let writing = start_inner(authorized, Cursor::new(vec![1u8; 100]), cancel);
+
+        let drain = match writing.write(|_| {}) {
+            WriteAttemptOutcome::CancelRequested(drain) => drain,
+            other => panic!("expected CancelRequested, got {other:?}"),
+        };
+        let mut synced = false;
+        let outcome = drain.drain_with(|sync_target| {
+            synced = true;
+            sync_target.sync_data()
+        });
+
+        assert!(synced);
+        let cancelled = match outcome {
+            CancelDrainOutcome::Drained(cancelled) => cancelled,
+            other => panic!("expected Drained, got {other:?}"),
+        };
+        assert_eq!(cancelled.bytes_written, 0);
+        assert_eq!(cancelled.reason, CancelReason::DeviceLost);
+        assert!(!cancelled.target_may_be_modified);
     }
 
     // F. A source shorter than the Gate-approved image_size becomes Failed
@@ -2266,9 +2536,10 @@ mod tests {
         assert_eq!(*progress_log.last().unwrap(), image_size);
     }
 
-    // I/J. Neither a consumed `Writing` nor any of the three terminal types
-    // (`WriteSucceeded`/`Failed`/`Cancelled`) has a method that advances
-    // state, retries the same attempt, or hands back a reusable
+    // I/J. Neither a consumed `Writing` nor any of its outcomes
+    // (`WriteSucceeded`/`Failed`/`CancelDrain`, and `CancelDrain`'s own
+    // `Cancelled`/`CancelDrainFailed`) has a method that retries the same
+    // attempt, writes again, or hands back a reusable
     // `ActiveWrite`/`Writing`. This is a structural fact verified by code
     // review/grep (no such methods exist anywhere in this file), not a
     // runtime test -- there is no way to write a `#[test]` that proves an
@@ -2733,7 +3004,7 @@ mod tests {
     }
 
     // P. WritingExecution::write(), cancelled before any chunk, still
-    // returns the same SelectedImage alongside WriteAttemptOutcome::Cancelled
+    // returns the same SelectedImage alongside WriteAttemptOutcome::CancelRequested
     // -- reusing the exact same pre-cancel technique as
     // `cancel_before_any_chunk_is_cancelled_with_user_requested_reason`
     // above, just through the new public entry point.
@@ -2763,8 +3034,8 @@ mod tests {
             original_generation
         );
         let cancelled = match outcome {
-            WriteAttemptOutcome::Cancelled(c) => c,
-            other => panic!("expected Cancelled, got {other:?}"),
+            WriteAttemptOutcome::CancelRequested(drain) => drained(drain),
+            other => panic!("expected CancelRequested, got {other:?}"),
         };
         assert_eq!(cancelled.bytes_written, 0);
         assert_eq!(cancelled.reason, CancelReason::UserRequested);
@@ -4830,8 +5101,8 @@ mod tests {
         });
 
         let cancelled = match outcome {
-            WriteAttemptOutcome::Cancelled(cancelled) => cancelled,
-            other => panic!("expected Cancelled, got {other:?}"),
+            WriteAttemptOutcome::CancelRequested(drain) => drained(drain),
+            other => panic!("expected CancelRequested, got {other:?}"),
         };
         assert_eq!(cancelled.bytes_written, writer::DEFAULT_CHUNK_SIZE as u64);
         assert!(cancelled.target_may_be_modified);
@@ -5473,10 +5744,10 @@ mod tests {
             }
         });
         match outcome {
-            WriteAttemptOutcome::Cancelled(cancelled) => {
-                assert_eq!(cancelled.bytes_written, chunk);
+            WriteAttemptOutcome::CancelRequested(drain) => {
+                assert_eq!(drained(drain).bytes_written, chunk);
             }
-            other => panic!("expected Cancelled, got {other:?}"),
+            other => panic!("expected CancelRequested, got {other:?}"),
         }
         let _ = std::fs::remove_file(&target_path);
         let _ = std::fs::remove_file(&path);

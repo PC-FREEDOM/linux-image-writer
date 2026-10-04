@@ -173,15 +173,24 @@ impl Write for ActiveWriteTarget<'_> {
 // verification is separate, future work. Nothing in this crate should be
 // read as claiming that `sync_all()` returning `Ok` means a write is
 // physically durable on real media.
-#[allow(dead_code)] // exercised by core.rs's/write_job.rs's tests today; not yet called from any non-test code path.
 pub(in crate::execution) struct SyncTarget<'a> {
     file: &'a File,
 }
 
 impl SyncTarget<'_> {
-    #[allow(dead_code)] // exercised by core.rs's/write_job.rs's tests today; not yet called from any non-test code path.
     pub(in crate::execution) fn sync_all(&self) -> io::Result<()> {
         self.file.sync_all()
+    }
+
+    // `fdatasync()`: writes back the data still pending for this FD and
+    // waits for it, without the metadata-only part of `fsync()`. Used by a
+    // cancelled write's drain (`write_job::CancelDrain::drain()`), which
+    // only needs the pending writes to have left the page cache before the
+    // FD is closed -- not the finished write's durability point, which
+    // stays `sync_all()`. Same caveat as `sync_all()` about physical
+    // durability.
+    pub(in crate::execution) fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data()
     }
 }
 

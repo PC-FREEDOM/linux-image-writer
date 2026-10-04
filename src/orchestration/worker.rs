@@ -118,6 +118,16 @@ pub enum WorkerEvent {
         bytes_written: u64,
         image_size: u64,
     },
+    // The write stopped at a cancellation and its pending data is being
+    // written back before the FD is closed (not cancellable).
+    CancelDrainStarted {
+        bytes_written: u64,
+    },
+    // `io::Error` cannot be copied; its kind and message are.
+    CancelDrainOnCallingThread {
+        kind: io::ErrorKind,
+        message: String,
+    },
     SyncStarted,
     // `io::Error` cannot be copied; its kind and message are.
     SyncOnCallingThread {
@@ -212,6 +222,15 @@ impl WorkerEvent {
                 bytes_written,
                 image_size,
             },
+            OperationEvent::CancelDrainStarted { bytes_written } => {
+                WorkerEvent::CancelDrainStarted { bytes_written }
+            }
+            OperationEvent::CancelDrainOnCallingThread { error } => {
+                WorkerEvent::CancelDrainOnCallingThread {
+                    kind: error.kind(),
+                    message: error.to_string(),
+                }
+            }
             OperationEvent::SyncStarted => WorkerEvent::SyncStarted,
             OperationEvent::SyncOnCallingThread { error } => WorkerEvent::SyncOnCallingThread {
                 kind: error.kind(),

@@ -1061,6 +1061,12 @@ impl orchestration::events::OperationObserver for CliObserver<'_> {
             } => println!(
                 "write-test: write succeeded ({bytes_written} of {image_size} bytes written)"
             ),
+            OperationEvent::CancelDrainStarted { bytes_written } => println!(
+                "write-test: cancelled after {bytes_written} bytes -- writing back pending data before closing the device..."
+            ),
+            OperationEvent::CancelDrainOnCallingThread { error } => println!(
+                "write-test: could not start the drain worker thread ({error}); draining on the main thread instead"
+            ),
             OperationEvent::SyncStarted => println!("write-test: syncing..."),
             OperationEvent::SyncOnCallingThread { error } => println!(
                 "write-test: could not start the sync worker thread ({error}); syncing on the main thread instead"
@@ -1325,6 +1331,19 @@ fn print_write_test_outcome(
                 );
                 identity_preserved(*image_size);
             }
+            // Cancelled, but the pending data could not be written back: a
+            // failure, not a clean cancellation.
+            OperationError::CancelDrain { failed, image_size } => {
+                println!("write-test: cancelled, but writing back pending data FAILED: {failed:?}");
+                println!(
+                    "write-test: the target may be partially overwritten -- retry_requires_fresh_gate={}",
+                    failed.retry_requires_fresh_gate
+                );
+                identity_preserved(*image_size);
+            }
+            OperationError::CancelDrainWorkerPanicked => println!(
+                "write-test: cancelled, but the drain worker panicked -- writing back pending data is not confirmed; the target may be partially overwritten"
+            ),
             OperationError::SyncWorkerPanicked { cancel_requested } => {
                 print_lines(format_sync_worker_panicked());
                 if *cancel_requested {

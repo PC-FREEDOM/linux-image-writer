@@ -339,6 +339,8 @@ fn summarize(outcome: &OperationOutcome) -> String {
                 OperationError::ImageBinding(_) => "ImageBinding",
                 OperationError::ReaderOpen(_) => "ReaderOpen",
                 OperationError::Write { .. } => "Write",
+                OperationError::CancelDrain { .. } => "CancelDrain",
+                OperationError::CancelDrainWorkerPanicked => "CancelDrainWorkerPanicked",
                 OperationError::SyncWorkerPanicked { .. } => "SyncWorkerPanicked",
                 OperationError::Sync { .. } => "Sync",
                 OperationError::VerifyNotStarted(_) => "VerifyNotStarted",
