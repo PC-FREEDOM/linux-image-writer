@@ -23,7 +23,7 @@ use crate::execution::linux_access::{FdMetadata, OpenDeviceError};
 use crate::execution::write_job::VerifyProgress;
 use crate::image_source::CompressionFormat;
 use crate::image_source::compressed::PreflightProgress;
-use crate::writer::{WritePlan, WriteProgress};
+use crate::writer::{WritePlan, WriteProgress, WritebackProgress};
 
 // Which of the operation's two device opens an event is about.
 /// Which of the operation's two device opens an event is about.
@@ -89,7 +89,14 @@ pub(crate) enum OperationEvent<'a> {
     // The authorization is bound to the confirmed image.
     ImageBound,
     WriteStarted,
+    // Bytes the kernel accepted (`write()` returned success); not
+    // necessarily written back to the device.
     WriteProgress(WriteProgress),
+    // Bytes an explicit sync confirmed as written back to the device. Sent
+    // only from a sync result, never from `write()` returns: after the
+    // final `fsync()` (before `SyncSucceeded`), and after a cancelled
+    // write's drain (before its FD is closed). Absent until then.
+    WritebackProgress(WritebackProgress),
     WriteSucceeded {
         bytes_written: u64,
         image_size: u64,

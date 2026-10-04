@@ -50,9 +50,38 @@ impl WritePlan {
     }
 }
 
+// Accepted progress: `bytes_written` is how many bytes `write()` calls have
+// returned success for so far -- the bytes the kernel *accepted*, which for
+// the buffered block device FD this crate writes through may still be
+// waiting in the page cache. It says nothing about write-back to the
+// device; that is `WritebackProgress`, a separate value that is never
+// derived from this one.
+/// Bytes accepted by the kernel so far (`write()` returned success); not
+/// necessarily written back to the device yet.
 #[derive(Debug, Clone, Copy)]
 pub struct WriteProgress {
     pub bytes_written: u64,
+    pub total_bytes: u64,
+}
+
+// Write-back progress: `completed_bytes` is how many bytes, from the start
+// of the image, an explicit sync on the write FD has confirmed as written
+// back from the page cache to the device (the sync call returned success
+// after covering them). Only a sync result may produce one -- never a
+// `write()` return, so it can lag behind `WriteProgress::bytes_written` and
+// is simply absent until the first confirmation. Narrower than "durable":
+// whether the device's own volatile cache was flushed is the final
+// `fsync()`'s business, not this value's.
+//
+// Produced today at the two points where a sync confirms everything
+// accepted so far: the final `fsync()` (`SyncSucceeded`) and a cancelled
+// write's `fdatasync()` (`CancelSynced`). A ranged write-back inside the
+// write loop (`sync_file_range`) would produce more of the same value.
+/// Bytes confirmed as written back to the device by an explicit sync, from
+/// the start of the image. Never derived from accepted bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WritebackProgress {
+    pub completed_bytes: u64,
     pub total_bytes: u64,
 }
 

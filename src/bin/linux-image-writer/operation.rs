@@ -113,7 +113,14 @@ pub struct Tracker {
     pub compressed_size: Option<u64>,
     pub image_size: Option<u64>,
     pub preflight: Option<Transfer>,
+    // Accepted bytes: what `write()` returned success for (the kernel took
+    // it; it may still be waiting to be written back). The progress bar
+    // shows this today.
     pub written: Option<Transfer>,
+    // Written-back bytes: what an explicit sync confirmed as written back
+    // to the device. `None` until the first confirmation -- unknown, not
+    // zero; never filled in from `written`.
+    pub writeback: Option<Transfer>,
     pub verified: Option<Transfer>,
     // The user asked to stop (Cancel, or declining the confirmation); the
     // operation decides where it actually stops.
@@ -134,6 +141,7 @@ impl Tracker {
             image_size: None,
             preflight: None,
             written: None,
+            writeback: None,
             verified: None,
             cancel_requested: false,
         }
@@ -203,6 +211,14 @@ impl Tracker {
                     total: progress.total_bytes,
                 });
             }
+            // Only the write-back value changes; the activity stays what it
+            // is (it arrives while syncing or cancelling).
+            WorkerEvent::WritebackProgress(progress) => {
+                self.writeback = Some(Transfer {
+                    done: progress.completed_bytes,
+                    total: progress.total_bytes,
+                });
+            }
             WorkerEvent::WriteSucceeded {
                 bytes_written,
                 image_size,
@@ -238,6 +254,15 @@ impl Tracker {
                 });
             }
         }
+    }
+
+    // Bytes accepted but not yet confirmed as written back. `None` while
+    // no write-back was confirmed (the amount pending is then unknown, not
+    // everything accepted) or nothing was accepted.
+    pub fn pending_writeback(&self) -> Option<u64> {
+        let accepted = self.written?.done;
+        let completed = self.writeback?.done;
+        Some(accepted.saturating_sub(completed))
     }
 
     // The worker asked for the final confirmation.
@@ -635,7 +660,7 @@ mod tests {
     use linux_image_writer::report::{
         CancelDrainFailed, Cancelled, CompressedImageRejection, Failed, PreflightError,
         PreflightProgress, VerifyCancelled, VerifyFailed, VerifyProgress, VerifySucceeded,
-        WriteJobFailureCause, WriteProgress, WriteStage,
+        WriteJobFailureCause, WriteProgress, WriteStage, WritebackProgress,
     };
     use linux_image_writer::{CancelReason, RiskLevel, SafetyAssessment};
     use std::io;
@@ -686,6 +711,96 @@ mod tests {
         tracker.apply(&WorkerEvent::WriteStarted);
         tracker.apply(&written(640));
         tracker
+    }
+
+    fn written_back(done: u64) -> WorkerEvent {
+        WorkerEvent::WritebackProgress(WritebackProgress {
+            completed_bytes: done,
+            total_bytes: 1000,
+        })
+    }
+
+    // ---- accepted vs written-back bytes ----
+
+    // Accepted bytes never stand in for written-back ones: while no sync
+    // confirmed anything, the write-back value and the pending amount are
+    // unknown -- even once every byte was accepted.
+    #[test]
+    fn accepted_bytes_do_not_count_as_written_back() {
+        let mut tracker = through_write(VerifyMode::Quick);
+        assert_eq!(
+            tracker.written,
+            Some(Transfer {
+                done: 640,
+                total: 1000
+            })
+        );
+        assert_eq!(tracker.writeback, None);
+        assert_eq!(tracker.pending_writeback(), None);
+
+        tracker.apply(&written(1000));
+        tracker.apply(&WorkerEvent::WriteSucceeded {
+            bytes_written: 1000,
+            image_size: 1000,
+        });
+        assert_eq!(tracker.writeback, None);
+        assert_eq!(tracker.pending_writeback(), None);
+    }
+
+    // The final sync's write-back confirmation completes the image; the
+    // activity stays "finishing" until the sync itself is reported done.
+    #[test]
+    fn final_sync_write_back_is_held_apart_from_accepted_bytes() {
+        let mut tracker = through_write(VerifyMode::Quick);
+        tracker.apply(&written(1000));
+        tracker.apply(&WorkerEvent::SyncStarted);
+
+        tracker.apply(&written_back(1000));
+        assert_eq!(tracker.activity, Activity::Syncing);
+        assert_eq!(
+            tracker.written,
+            Some(Transfer {
+                done: 1000,
+                total: 1000
+            })
+        );
+        assert_eq!(
+            tracker.writeback,
+            Some(Transfer {
+                done: 1000,
+                total: 1000
+            })
+        );
+        assert_eq!(tracker.pending_writeback(), Some(0));
+    }
+
+    // A cancelled write's drain confirms what was accepted; accepted,
+    // written-back and pending are all available.
+    #[test]
+    fn cancel_drain_write_back_is_held_with_its_pending_amount() {
+        let mut tracker = through_write(VerifyMode::Quick);
+        tracker.apply(&WorkerEvent::CancelDrainStarted { bytes_written: 640 });
+
+        tracker.apply(&written_back(600));
+        assert_eq!(
+            tracker.written,
+            Some(Transfer {
+                done: 640,
+                total: 1000
+            })
+        );
+        assert_eq!(
+            tracker.writeback,
+            Some(Transfer {
+                done: 600,
+                total: 1000
+            })
+        );
+        assert_eq!(tracker.pending_writeback(), Some(40));
+
+        tracker.apply(&written_back(640));
+        assert_eq!(tracker.pending_writeback(), Some(0));
+        assert!(tracker.cancel_requested);
     }
 
     // ---- phase mapping ----

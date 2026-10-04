@@ -1055,6 +1055,10 @@ impl orchestration::events::OperationObserver for CliObserver<'_> {
                     progress.bytes_written, progress.total_bytes
                 );
             }
+            OperationEvent::WritebackProgress(progress) => println!(
+                "write-test: written back to the device (confirmed by sync): {} of {} bytes",
+                progress.completed_bytes, progress.total_bytes
+            ),
             OperationEvent::WriteSucceeded {
                 bytes_written,
                 image_size,

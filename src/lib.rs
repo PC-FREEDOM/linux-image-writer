@@ -272,5 +272,5 @@ pub mod report {
     pub use crate::orchestration::removal::{
         RemovalActionError, RemovalStage, RemovalUnavailable, RemovalUnsupported,
     };
-    pub use crate::writer::{WriteError, WritePlan, WriteProgress};
+    pub use crate::writer::{WriteError, WritePlan, WriteProgress, WritebackProgress};
 }

@@ -57,7 +57,7 @@ use crate::execution::write_job::{CancelHandle, CancelReason, VerifyProgress};
 use crate::image_source::CompressionFormat;
 use crate::image_source::compressed::PreflightProgress;
 use crate::safety::SafetyAssessment;
-use crate::writer::{WritePlan, WriteProgress};
+use crate::writer::{WritePlan, WriteProgress, WritebackProgress};
 
 // How often a pending confirmation re-checks for cancellation while no
 // decision has arrived (the same bound the CLI prompt uses).
@@ -114,6 +114,7 @@ pub enum WorkerEvent {
     ImageBound,
     WriteStarted,
     WriteProgress(WriteProgress),
+    WritebackProgress(WritebackProgress),
     WriteSucceeded {
         bytes_written: u64,
         image_size: u64,
@@ -215,6 +216,7 @@ impl WorkerEvent {
             OperationEvent::ImageBound => WorkerEvent::ImageBound,
             OperationEvent::WriteStarted => WorkerEvent::WriteStarted,
             OperationEvent::WriteProgress(progress) => WorkerEvent::WriteProgress(progress),
+            OperationEvent::WritebackProgress(progress) => WorkerEvent::WritebackProgress(progress),
             OperationEvent::WriteSucceeded {
                 bytes_written,
                 image_size,

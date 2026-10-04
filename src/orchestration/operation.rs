@@ -545,13 +545,15 @@ pub(super) fn run_on(
             });
         }
         // ---- cancelled: drain on the still-open FD, then close it ----
-        // Like sync: on a worker thread, awaited to completion, never
-        // skipped. `Cancelled` is returned only after the FD is closed.
+        // The drain (fdatasync) runs like sync: on a worker thread, awaited
+        // to completion, never skipped. The FD is closed after the
+        // write-back is reported, on this thread (little is left for the
+        // close to write back), and `Cancelled` is returned only after it.
         WriteAttemptOutcome::CancelRequested(drain) => {
             observer.on_event(OperationEvent::CancelDrainStarted {
                 bytes_written: drain.bytes_written,
             });
-            let drained = match run_off_main_thread(drain, |drain| drain.drain()) {
+            let synced = match run_off_main_thread(drain, |drain| drain.drain()) {
                 OffMainThread::Finished(outcome) => outcome,
                 OffMainThread::NotStarted(drain, error) => {
                     observer.on_event(OperationEvent::CancelDrainOnCallingThread { error: &error });
@@ -561,11 +563,18 @@ pub(super) fn run_on(
                     return Failed(OperationError::CancelDrainWorkerPanicked);
                 }
             };
-            return match drained {
-                CancelDrainOutcome::Drained(cancelled) => Cancelled(CancelledAt::Write {
-                    cancelled,
-                    image_size: image.logical_size(),
-                }),
+            return match synced {
+                // Written back: report it while the FD is still open, then
+                // close it, then report the cancellation.
+                CancelDrainOutcome::Synced(synced) => {
+                    observer.on_event(OperationEvent::WritebackProgress(
+                        synced.writeback_progress(),
+                    ));
+                    Cancelled(CancelledAt::Write {
+                        cancelled: synced.close(),
+                        image_size: image.logical_size(),
+                    })
+                }
                 CancelDrainOutcome::Failed(failed) => Failed(OperationError::CancelDrain {
                     failed,
                     image_size: image.logical_size(),
@@ -602,6 +611,9 @@ pub(super) fn run_on(
             });
         }
     };
+    observer.on_event(OperationEvent::WritebackProgress(
+        synced.writeback_progress(),
+    ));
     observer.on_event(OperationEvent::SyncSucceeded {
         bytes_written: synced.bytes_written,
     });
@@ -709,6 +721,7 @@ mod tests {
     use crate::execution::linux_access::OpenDeviceError;
     use crate::execution::write_job::{CancelReason, VerifyFailureReason, WriteStage};
     use crate::image_source::CompressionFormat;
+    use crate::writer::WritebackProgress;
     use std::io::Read as _;
 
     fn cli_target() -> TargetRef {
@@ -1173,6 +1186,42 @@ mod tests {
         assert_eq!(source.matches("File::open").count(), 0);
     }
 
+    // A cancelled write: the drain announced, then the drain itself, then
+    // the write-back it confirmed -- reported while the FD is still open --
+    // then the close, then the `Cancelled`; a failed drain reports no
+    // write-back. Checked on the source, since a temporary file's
+    // `fdatasync()` cannot be made to fail and the close is not an event.
+    #[test]
+    fn a_cancelled_write_reports_write_back_before_closing() {
+        let source = include_str!("operation.rs");
+        let source = &source[..source.find("\n#[cfg(test)]\nmod tests {").unwrap()];
+        let start = source
+            .find("WriteAttemptOutcome::CancelRequested(drain) => {")
+            .unwrap();
+        let arm = &source[start..];
+        let arm = &arm[..arm
+            .find("observer.on_event(OperationEvent::WriteSucceeded {")
+            .unwrap()];
+        let steps = [
+            "OperationEvent::CancelDrainStarted {",
+            "run_off_main_thread(drain, |drain| drain.drain())",
+            "CancelDrainOutcome::Synced(synced) => {",
+            "OperationEvent::WritebackProgress(",
+            "synced.writeback_progress()",
+            "cancelled: synced.close(),",
+            "CancelDrainOutcome::Failed(failed) => Failed(OperationError::CancelDrain {",
+        ];
+        let mut previous = 0;
+        for step in steps {
+            assert_eq!(arm.matches(step).count(), 1, "{step}");
+            let at = arm.find(step).unwrap();
+            assert!(at >= previous, "{step} is out of order");
+            previous = at;
+        }
+        let failed_arm = &arm[arm.find("CancelDrainOutcome::Failed(failed)").unwrap()..];
+        assert!(!failed_arm.contains("WritebackProgress"));
+    }
+
     // ---- the whole operation (`run_on` with a scripted platform) ----
 
     // Records every event by name, answers the confirmation with `answer`,
@@ -1186,6 +1235,8 @@ mod tests {
         // Every snapshot `write_started_on` handed on (kept apart from the
         // events, whose exact order other tests check).
         bound: Vec<DeviceSnapshot>,
+        // The value of every `WritebackProgress` event, in order.
+        writeback: Vec<WritebackProgress>,
     }
 
     impl TestObserver {
@@ -1200,6 +1251,7 @@ mod tests {
                 cancel_on: None,
                 pause: None,
                 bound: Vec::new(),
+                writeback: Vec::new(),
             }
         }
 
@@ -1220,6 +1272,9 @@ mod tests {
     impl OperationObserver for TestObserver {
         fn on_event(&mut self, event: OperationEvent<'_>) {
             let name = event_name(&event);
+            if let OperationEvent::WritebackProgress(progress) = &event {
+                self.writeback.push(*progress);
+            }
             if let Some((trigger, cancel)) = &self.cancel_on {
                 if name == *trigger {
                     cancel.request_cancel(CancelReason::UserRequested);
@@ -1363,7 +1418,15 @@ mod tests {
                 "FdBound",
             ]);
             expected.extend(["WriteAuthorized", "ImageBound", "WriteStarted"]);
-            expected.extend(["WriteSucceeded", "SyncStarted", "SyncSucceeded"]);
+            // Write-back is confirmed once, by the final sync -- never during
+            // the write loop (only `WriteProgress`, accepted bytes, is
+            // filtered out below).
+            expected.extend([
+                "WriteSucceeded",
+                "SyncStarted",
+                "WritebackProgress",
+                "SyncSucceeded",
+            ]);
             if verify {
                 expected.extend([
                     "VerifyPending",
@@ -1386,6 +1449,14 @@ mod tests {
                 .collect();
             assert_eq!(seen, expected, "{label}");
             assert!(observer.saw("WriteProgress"), "{label}");
+            assert_eq!(
+                observer.writeback,
+                [WritebackProgress {
+                    completed_bytes: data.len() as u64,
+                    total_bytes: data.len() as u64,
+                }],
+                "{label}"
+            );
             assert_eq!(observer.saw("PreflightProgress"), compressed, "{label}");
             assert_eq!(observer.saw("VerifyProgress"), verify, "{label}");
         }
@@ -1755,11 +1826,19 @@ mod tests {
             other => panic!("{other:?}"),
         };
         // The cancelled write is drained (and its FD closed) before the
-        // outcome: the drain is the last thing announced, and what the
+        // outcome: the drain, then the write-back it confirmed (exactly the
+        // accepted bytes), are the last things announced, and what the
         // writer handed over is on the target.
         assert_eq!(
-            observer.events.last().map(String::as_str),
-            Some("CancelDrainStarted")
+            observer.events[observer.events.len() - 2..],
+            ["CancelDrainStarted", "WritebackProgress"]
+        );
+        assert_eq!(
+            observer.writeback,
+            [WritebackProgress {
+                completed_bytes: bytes_written,
+                total_bytes: data.len() as u64,
+            }]
         );
         assert!(!observer.saw("WriteSucceeded"));
         assert!(!observer.saw("SyncStarted"));

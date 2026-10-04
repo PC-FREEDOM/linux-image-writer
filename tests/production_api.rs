@@ -135,6 +135,7 @@ fn describe_event(event: &WorkerEvent) -> &'static str {
         WorkerEvent::ImageBound => "image bound",
         WorkerEvent::WriteStarted => "write",
         WorkerEvent::WriteProgress(_) => "write progress",
+        WorkerEvent::WritebackProgress(_) => "writeback progress",
         WorkerEvent::WriteSucceeded { .. } => "written",
         WorkerEvent::CancelDrainStarted { .. } => "cancel drain",
         WorkerEvent::CancelDrainOnCallingThread { .. } => "cancel drain here",
