@@ -402,7 +402,10 @@ pub(crate) fn run_write_operation(
     cancel: &CancelHandle,
     observer: &mut impl OperationObserver,
 ) -> OperationOutcome {
-    run_on(&LinuxPlatform, request, cancel, observer)
+    let outcome = run_on(&LinuxPlatform, request, cancel, observer);
+    #[cfg(debug_assertions)]
+    crate::cancel_diag::outcome(&outcome);
+    outcome
 }
 
 // The sequence itself, with the platform as a parameter so tests can run it
@@ -534,12 +537,16 @@ pub(super) fn run_on(
     };
     observer.on_event(OperationEvent::WriteStarted);
     observer.write_started_on(bound);
+    #[cfg(debug_assertions)]
+    crate::cancel_diag::write_started();
 
     let (image, write_outcome) = writing.write_with_writeback(|progress| match progress {
         WriteLoopProgress::Accepted(progress) => {
             observer.on_event(OperationEvent::WriteProgress(progress))
         }
         WriteLoopProgress::WrittenBack(progress) => {
+            #[cfg(debug_assertions)]
+            crate::cancel_diag::written_back(progress.completed_bytes);
             observer.on_event(OperationEvent::WritebackProgress(progress))
         }
     });
@@ -557,6 +564,8 @@ pub(super) fn run_on(
         // write-back is reported, on this thread (little is left for the
         // close to write back), and `Cancelled` is returned only after it.
         WriteAttemptOutcome::CancelRequested(drain) => {
+            #[cfg(debug_assertions)]
+            crate::cancel_diag::cancel_drain_started(drain.bytes_written);
             observer.on_event(OperationEvent::CancelDrainStarted {
                 bytes_written: drain.bytes_written,
             });
@@ -574,6 +583,8 @@ pub(super) fn run_on(
                 // Written back: report it while the FD is still open, then
                 // close it, then report the cancellation.
                 CancelDrainOutcome::Synced(synced) => {
+                    #[cfg(debug_assertions)]
+                    crate::cancel_diag::writeback_after_drain(&synced);
                     observer.on_event(OperationEvent::WritebackProgress(
                         synced.writeback_progress(),
                     ));

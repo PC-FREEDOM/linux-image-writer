@@ -381,6 +381,8 @@ fn spawn_on<P: Platform + Send + 'static>(
                 bound: None,
             };
             let outcome = run_on(&platform, request, &worker_cancel, &mut observer);
+            #[cfg(debug_assertions)]
+            crate::cancel_diag::outcome(&outcome);
             // `run_on` has returned: every device FD the operation opened is
             // closed. Only now may Safe Removal's reference exist.
             let removal = removal_for(observer.bound.take(), &outcome);

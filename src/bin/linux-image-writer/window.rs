@@ -1969,6 +1969,12 @@ fn request_cancel(ui: &Rc<Ui>) {
         let Some(worker) = operation.worker.as_ref() else {
             return;
         };
+        #[cfg(debug_assertions)]
+        linux_image_writer::cancel_diag::cancel_requested(
+            operation.tracker.written.map(|written| written.done),
+            operation.tracker.writeback.map(|writeback| writeback.done),
+            operation.tracker.pending_writeback(),
+        );
         worker.request_cancel();
         operation.tracker.cancel_requested = true;
     }

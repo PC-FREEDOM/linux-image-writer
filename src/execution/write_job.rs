@@ -219,6 +219,8 @@ impl CancelHandle {
             CancelReason::Unknown => CANCEL_USER_REQUESTED,
         };
         self.state.store(value, Ordering::SeqCst);
+        #[cfg(debug_assertions)]
+        crate::cancel_diag::cancel_flag_set();
     }
 
     /// Whether cancellation has been requested.
@@ -525,7 +527,14 @@ impl CancelDrain {
     // Blocking and not cancellable (a single syscall, like
     // `Syncing::sync()`); the caller runs it on a worker thread.
     pub fn drain(self) -> CancelDrainOutcome {
-        self.drain_with(|target| target.sync_data())
+        self.drain_with(|target| {
+            #[cfg(debug_assertions)]
+            let started = crate::cancel_diag::fdatasync_started();
+            let result = target.sync_data();
+            #[cfg(debug_assertions)]
+            crate::cancel_diag::fdatasync_finished(started, result.as_ref().err());
+            result
+        })
     }
 
     // `drain()` with the sync step supplied, so tests can observe the FD
@@ -589,7 +598,11 @@ impl CancelSynced {
             active,
         } = self;
 
+        #[cfg(debug_assertions)]
+        let started = crate::cancel_diag::close_started();
         drop(active);
+        #[cfg(debug_assertions)]
+        crate::cancel_diag::close_finished(started);
 
         Cancelled {
             image_size,

@@ -1,3 +1,7 @@
+// Debug builds only (see the module); the CLI does not log the request.
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+mod cancel_diag;
 mod device;
 mod execution;
 mod identity;

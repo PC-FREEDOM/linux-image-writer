@@ -202,6 +202,12 @@
 // compiles these same files as its own crate (its diagnostic modes); in
 // this library they are unused, hence the per-module `dead_code`
 // allowances where that happens.
+// Debug builds only: `[CancelDiag]` timing lines on stderr for a cancelled
+// write (see the module). Public only for the GUI's Cancel button to log
+// the request; not part of the API, and absent from release builds.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod cancel_diag;
 mod device;
 mod execution;
 mod identity;
