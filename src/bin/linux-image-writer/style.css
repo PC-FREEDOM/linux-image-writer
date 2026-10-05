@@ -184,8 +184,8 @@ button.liw-primary.suggested-action:disabled {
 }
 
 button.liw-action {
-  min-height: 24px;
-  padding: 8px 20px;
+  min-height: 28px;
+  padding: 8px 22px;
   border-radius: 8px;
 }
 
@@ -203,11 +203,13 @@ button.liw-cancel:disabled {
 
 .liw-headline {
   font-weight: 800;
+  /* A breath between the phase and the progress area under it. */
+  margin-bottom: 6px;
 }
 
 /* The progress area: its own quiet card. */
 .liw-progress-card {
-  padding: 16px 18px 14px;
+  padding: 22px 24px 20px;
   border-radius: 10px;
   background-color: @card_bg_color;
   box-shadow: 0 0 0 1px alpha(currentColor, 0.1);
@@ -233,6 +235,7 @@ progressbar.liw-progress > trough > progress {
 
 .liw-progress-detail {
   opacity: 0.85;
+  line-height: 1.4;
 }
 
 /* The spinner beside the detail: that the operation is still working. */
@@ -259,13 +262,40 @@ progressbar.liw-progress > trough > progress {
   animation: liw-breathe 1.2s ease-in-out infinite alternate;
 }
 
+/* The status line and the safety note: one short block, a little apart
+ * from the progress area, with room between their lines. */
+.liw-op-explanation {
+  margin-top: 4px;
+}
+
 .liw-status {
   opacity: 0.8;
+  line-height: 1.45;
 }
 
 .liw-safety-note {
   font-size: 0.92em;
   opacity: 0.7;
+  line-height: 1.45;
+}
+
+/* The steps, what is written where, and the technical details: set off
+ * from the status block and from each other. */
+.liw-op-steps {
+  margin-top: 10px;
+  margin-bottom: 2px;
+}
+
+.liw-op-flow {
+  margin-top: 2px;
+}
+
+.liw-op-details {
+  margin-top: 10px;
+}
+
+.liw-op-details > row.expander row.header {
+  min-height: 56px;
 }
 
 /* ---- The steps: a simple status indicator per step ---- */
@@ -319,11 +349,12 @@ progressbar.liw-progress > trough > progress {
 /* ---- Result: icon, title, message ---- */
 
 .liw-result-icon {
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 
 .liw-result-message {
   margin-top: 2px;
+  line-height: 1.45;
 }
 
 /* Safe Removal: the one status that says the drive can be removed. */

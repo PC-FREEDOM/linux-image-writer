@@ -150,7 +150,11 @@ struct OperationUi {
     // spinner and the phase detail under them.
     progress_card: gtk::Box,
     percent: gtk::Label,
+    // The spinner and the phase detail, side by side under the bar.
+    activity_row: gtk::Box,
     spinner: gtk::Spinner,
+    // The status line and the safety note, as one block.
+    explanation: gtk::Box,
     status: gtk::Label,
     note: gtk::Label,
     image: gtk::Label,
@@ -2072,7 +2076,8 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     let target = centered(&[]);
     let flow = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(4)
+        .spacing(6)
+        .css_classes(["liw-op-flow"])
         .build();
     flow.append(&image);
     flow.append(&arrow);
@@ -2082,6 +2087,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .halign(gtk::Align::Center)
+        .css_classes(["liw-op-steps"])
         .build();
     // The three steps take the same width, whatever their state says.
     let columns = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
@@ -2176,7 +2182,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     activity_row.append(&amount);
     let progress_card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(10)
+        .spacing(14)
         .css_classes(["liw-progress-card"])
         .build();
     progress_card.append(&bar_row);
@@ -2206,6 +2212,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
     };
 
     let details_list = list();
+    details_list.add_css_class("liw-op-details");
     let expander = adw::ExpanderRow::builder().build();
     expander.set_use_markup(false);
     expander.set_title(&tr("Technical details"));
@@ -2219,13 +2226,23 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .collect();
     details_list.append(&expander);
 
+    // The status line and the safety note read as one short block, closer
+    // to each other than to the progress area above them.
+    let explanation = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .css_classes(["liw-op-explanation"])
+        .build();
+    explanation.append(&status);
+    explanation.append(&note);
+
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
-        .margin_top(18)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(14)
+        .margin_top(28)
+        .margin_bottom(24)
+        .margin_start(16)
+        .margin_end(16)
         .css_classes(["liw-op"])
         .build();
     // Read top to bottom: the phase (or result), how far, what it is
@@ -2235,8 +2252,7 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         icon.upcast_ref::<gtk::Widget>(),
         title.upcast_ref(),
         progress_card.upcast_ref(),
-        status.upcast_ref(),
-        note.upcast_ref(),
+        explanation.upcast_ref(),
         message.upcast_ref(),
         removal.list.upcast_ref(),
         phases.upcast_ref(),
@@ -2263,9 +2279,9 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
         .build();
     let bottom = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
-        .margin_top(8)
-        .margin_bottom(8)
+        .spacing(8)
+        .margin_top(14)
+        .margin_bottom(16)
         .build();
     bottom.append(&cancel);
     // Shown only as the result offers them (Safe Removal only for a target
@@ -2312,7 +2328,9 @@ fn build_operation_view() -> (OperationUi, adw::ToolbarView) {
             title,
             progress_card,
             percent,
+            activity_row,
             spinner,
+            explanation,
             status,
             note,
             image,
@@ -2417,6 +2435,8 @@ fn render_operation(ui: &Ui) {
             op.status.set_visible(!status.is_empty());
             op.note.set_text(&note);
             op.note.set_visible(!note.is_empty());
+            op.explanation
+                .set_visible(!status.is_empty() || !note.is_empty());
             // The bar is the whole operation's progress
             // (`Tracker::overall`), always its measured value. That work
             // continues is the spinner's (not while waiting for the user's
@@ -2448,6 +2468,7 @@ fn render_operation(ui: &Ui) {
             op.title.set_text(&text::result_title(view.case));
             op.status.set_visible(false);
             op.note.set_visible(false);
+            op.explanation.set_visible(false);
             // 100% only for a completed operation; a cancelled or failed
             // one shows no progress at all.
             match progress::shown(tracker, operation.ended.as_ref().map(|(ending, _)| *ending)) {
@@ -2484,6 +2505,14 @@ fn render_operation(ui: &Ui) {
             op.action_row.set_visible(!view.actions.is_empty());
         }
     }
+    // The row under the bar takes no room when it has nothing to show (a
+    // completed operation's static 100%).
+    // (The widgets' own `visible` flags: `is_visible` would also require
+    // every parent, this row included, to be shown.)
+    let shown = |widget: &gtk::Widget| widget.property::<bool>("visible");
+    op.activity_row
+        .set_visible(shown(op.spinner.upcast_ref()) || shown(op.amount.upcast_ref()));
+
     // Before the outcome is joined and shown, neither button acts.
     if view.is_none() && tracker.activity == operation::Activity::Finished {
         op.cancel.set_sensitive(false);
