@@ -445,19 +445,17 @@ pub fn activity(tracker: &Tracker) -> (String, String) {
 // bytes. Written-back bytes, not accepted ones, are "written to the USB
 // drive"; while none is confirmed yet, the bytes read from the image are
 // said as such. `None` when the phase has nothing measurable to say.
+//
+// Finishing and stopping say no amount: what is not yet confirmed as
+// written back (`Tracker::pending_writeback`) is not what is still left to
+// write -- on real hardware 64 MiB unconfirmed was confirmed by a 6.5 ms
+// `fdatasync()` -- so it is not shown as "about {size} left".
 pub fn phase_detail(tracker: &Tracker) -> Option<String> {
-    let pending = || tracker.pending_writeback().filter(|pending| *pending > 0);
     if tracker.cancel_requested {
         if tracker.step() != Step::Write {
             return None;
         }
-        return Some(match pending() {
-            Some(pending) => fill(
-                tr("Safely stopping the write: about {size} left to write"),
-                &[("size", &size(pending))],
-            ),
-            None => tr("Safely stopping the write"),
-        });
+        return Some(tr("Safely stopping the write"));
     }
     match tracker.activity {
         Activity::Preflight => tracker.preflight.map(|t| transfer(t.done, t.total)),
@@ -475,13 +473,7 @@ pub fn phase_detail(tracker: &Tracker) -> Option<String> {
             (None, None) => None,
         },
         Activity::Syncing if tracker.synced => None,
-        Activity::Syncing => Some(match pending() {
-            Some(pending) => fill(
-                tr("Finishing the last {size} or so"),
-                &[("size", &size(pending))],
-            ),
-            None => tr("Confirming the write to the USB drive"),
-        }),
+        Activity::Syncing => Some(tr("Confirming the write to the USB drive")),
         Activity::Verifying => tracker.verified.map(|verified| {
             fill(
                 tr("Checking: {amount}"),
@@ -507,7 +499,7 @@ pub fn cannot_close(tracker: &Tracker) -> (String, String) {
         return (
             tr("Finishing the Write"),
             tr(
-                "The rest of the data is being written to the USB drive. The window cannot be closed until it has finished.",
+                "Confirming the write to the USB drive. The window cannot be closed until this is complete.",
             ),
         );
     }
@@ -1150,10 +1142,11 @@ mod tests {
         });
     }
 
-    // Finishing: what is left, when known; otherwise that the write is
-    // being confirmed. The sync's own end says nothing more.
+    // Finishing: that the write is being confirmed, with no amount -- even
+    // with data not yet confirmed as written back. The sync's own end says
+    // nothing more.
     #[test]
-    fn finishing_detail_says_what_is_left() {
+    fn finishing_detail_says_the_write_is_being_confirmed() {
         crate::i18n::ja(|| {
             let mut tracker = tracker_at(VerifyMode::None, Activity::Syncing);
             tracker.written = transfer_of(3_990_000_000, 3_990_000_000);
@@ -1164,7 +1157,7 @@ mod tests {
             tracker.writeback = transfer_of(3_949_000_000, 3_990_000_000);
             assert_eq!(
                 phase_detail(&tracker).unwrap(),
-                "残り約 41.0 MB を仕上げています"
+                "USB への書き込みを確定しています"
             );
             tracker.writeback = transfer_of(3_990_000_000, 3_990_000_000);
             assert_eq!(
@@ -1176,10 +1169,10 @@ mod tests {
         });
     }
 
-    // Cancelling during the write: what is left to write before it stops,
-    // when known -- never "cancelled" before the outcome says so.
+    // Cancelling during the write: that it is being stopped safely, with no
+    // amount -- never "cancelled" before the outcome says so.
     #[test]
-    fn cancelling_detail_says_what_is_left_to_stop_safely() {
+    fn cancelling_detail_says_the_write_is_stopping_safely() {
         crate::i18n::ja(|| {
             let mut tracker = tracker_at(VerifyMode::Quick, Activity::Writing);
             tracker.cancel_requested = true;
@@ -1190,7 +1183,8 @@ mod tests {
             tracker.written = transfer_of(700_000_000, 3_990_000_000);
             tracker.writeback = transfer_of(659_000_000, 3_990_000_000);
             let detail = phase_detail(&tracker).unwrap();
-            assert_eq!(detail, "残り約 41.0 MB の書き込みを安全に終了しています");
+            assert_eq!(detail, "書き込みを安全に終了しています");
+            assert!(!detail.contains("MB"));
             assert!(!detail.contains("中止しました"));
             assert_eq!(headline(&tracker), "中止しています");
             // Outside the write, a cancellation has nothing to finish.
@@ -1227,7 +1221,8 @@ mod tests {
                 cannot_close(&tracker),
                 (
                     "書き込みを仕上げています".to_string(),
-                    "残りのデータを USB ドライブに書き込んでいます。完了するまで、ウィンドウは閉じられません。".to_string()
+                    "USB への書き込みを確定しています。完了するまで、ウィンドウは閉じられません。"
+                        .to_string()
                 )
             );
             tracker.cancel_requested = true;

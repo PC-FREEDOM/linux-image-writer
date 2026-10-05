@@ -454,7 +454,7 @@ mod tests {
             );
             assert_eq!(
                 text::phase_detail(&finalizing.tracker).unwrap(),
-                "残り約 67.1 MB を仕上げています"
+                "USB への書き込みを確定しています"
             );
             assert_eq!(percent(&finalizing), Some(92));
             assert!(finalizing.tracker.overall().busy);
@@ -463,7 +463,7 @@ mod tests {
             assert_eq!(text::headline(&cancelling.tracker), "中止しています");
             assert_eq!(
                 text::phase_detail(&cancelling.tracker).unwrap(),
-                "残り約 43.0 MB の書き込みを安全に終了しています"
+                "書き込みを安全に終了しています"
             );
             // 11. Cancel is disabled while cancelling.
             assert_eq!(

@@ -417,11 +417,6 @@ msgstr "クイック検証中"
 msgid "Checking the written data."
 msgstr "書き込んだデータを確認しています。"
 
-#: src/bin/linux-image-writer/text.rs:456
-#, rust-format
-msgid "Safely stopping the write: about {size} left to write"
-msgstr "残り約 {size} の書き込みを安全に終了しています"
-
 #: src/bin/linux-image-writer/text.rs:459
 msgid "Safely stopping the write"
 msgstr "書き込みを安全に終了しています"
@@ -437,11 +432,6 @@ msgid ""
 "Waiting for the USB drive to confirm the first data ({size} read from the "
 "image)"
 msgstr "USB への書き込みの確認を待っています（イメージから {size} 読み込み済み）"
-
-#: src/bin/linux-image-writer/text.rs:478
-#, rust-format
-msgid "Finishing the last {size} or so"
-msgstr "残り約 {size} を仕上げています"
 
 #: src/bin/linux-image-writer/text.rs:481
 msgid "Confirming the write to the USB drive"
@@ -460,9 +450,9 @@ msgstr "USB への書き込みを安全に終了しています。完了する�
 
 #: src/bin/linux-image-writer/text.rs:505
 msgid ""
-"The rest of the data is being written to the USB drive. The window cannot be "
-"closed until it has finished."
-msgstr "残りのデータを USB ドライブに書き込んでいます。完了するまで、ウィンドウは閉じられません。"
+"Confirming the write to the USB drive. The window cannot be closed until "
+"this is complete."
+msgstr "USB への書き込みを確定しています。完了するまで、ウィンドウは閉じられません。"
 
 #: src/bin/linux-image-writer/text.rs:509
 msgid "Writing in Progress"

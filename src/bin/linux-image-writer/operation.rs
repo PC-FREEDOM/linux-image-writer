@@ -294,7 +294,10 @@ impl Tracker {
 
     // Bytes accepted but not yet confirmed as written back. `None` while
     // no write-back was confirmed (the amount pending is then unknown, not
-    // everything accepted) or nothing was accepted.
+    // everything accepted) or nothing was accepted. Not shown in the view
+    // (it is not what is left to write); kept for the tests and the
+    // debug-only Cancel diagnostics, so unused in a release build.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn pending_writeback(&self) -> Option<u64> {
         let accepted = self.written?.done;
         let completed = self.writeback?.done;
