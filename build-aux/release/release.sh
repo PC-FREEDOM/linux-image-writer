@@ -19,7 +19,7 @@
 #     -v "$PWD":/src \
 #     -v linux-image-writer-cargo-registry:/opt/cargo/registry \
 #     linux-image-writer-appimage-build \
-#     build-aux/release/release.sh --release 0.1.1
+#     build-aux/release/release.sh --release 0.1.2
 #
 # It only orchestrates; every artifact is made by the existing scripts:
 #   build-aux/rust-licenses/generate.sh --check   the licence document is current

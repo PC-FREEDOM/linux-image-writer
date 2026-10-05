@@ -8,26 +8,26 @@ v0.1.1 から、Linux Image Writer の各リリース(GitHub Release)に AppImag
 
 ## ダウンロードと確認
 
-リリースのページから、次の2つのファイルをダウンロードします(v0.1.1 の
+リリースのページから、次の2つのファイルをダウンロードします(v0.1.2 の
 例):
 
-- `LinuxImageWriter-0.1.1-x86_64.AppImage`
-- `LinuxImageWriter-0.1.1-x86_64.AppImage.sha256`
+- `LinuxImageWriter-0.1.2-x86_64.AppImage`
+- `LinuxImageWriter-0.1.2-x86_64.AppImage.sha256`
 
 保存したフォルダで、ダウンロードしたファイルを確認します。
 
 ```sh
-sha256sum -c LinuxImageWriter-0.1.1-x86_64.AppImage.sha256
+sha256sum -c LinuxImageWriter-0.1.2-x86_64.AppImage.sha256
 ```
 
-`LinuxImageWriter-0.1.1-x86_64.AppImage: OK` と表示されれば正常です。
+`LinuxImageWriter-0.1.2-x86_64.AppImage: OK` と表示されれば正常です。
 そう表示されない場合は、ファイルを削除してダウンロードし直してください。
 
 ## 起動
 
 ```sh
-chmod +x LinuxImageWriter-0.1.1-x86_64.AppImage
-./LinuxImageWriter-0.1.1-x86_64.AppImage
+chmod +x LinuxImageWriter-0.1.2-x86_64.AppImage
+./LinuxImageWriter-0.1.2-x86_64.AppImage
 ```
 
 ファイルマネージャーで実行を許可して(プロパティ → アクセス権)、そこから
@@ -51,7 +51,7 @@ AppImage は FUSE で自分自身をマウントして動きます。それが�
 (`/dev/fuse` のないコンテナなど)では、次のように起動します。
 
 ```sh
-./LinuxImageWriter-0.1.1-x86_64.AppImage --appimage-extract-and-run
+./LinuxImageWriter-0.1.2-x86_64.AppImage --appimage-extract-and-run
 ```
 
 この場合は、いったん一時フォルダに展開してから起動します(約 95 MB。

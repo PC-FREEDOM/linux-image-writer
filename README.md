@@ -10,7 +10,7 @@ A simple USB image writer for Linux, designed with safety in mind.
 
 ## Status
 
-Linux Image Writer v0.1.1 is the current release.
+Linux Image Writer v0.1.2 is the current release.
 An official x86_64 AppImage is available from the GitHub Releases page.
 
 ## Features
@@ -23,8 +23,8 @@ An official x86_64 AppImage is available from the GitHub Releases page.
 - Checks the selected drive again right before writing
 - Asks for a final confirmation that shows the drive to be written
 - Optional verification after writing: Quick, Full or None
-- Shows progress through preparing, writing and verifying
-- Lets you cancel the operation
+- Shows progress through preparing, writing, finalizing and verifying
+- Lets you safely cancel the operation
 - Summarizes the outcome on a result screen
 - Optional safe removal of the USB drive from the result screen
 - GTK 4 and libadwaita user interface

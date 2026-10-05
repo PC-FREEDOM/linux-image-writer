@@ -8,25 +8,25 @@ without installation.
 
 ## Download and verify
 
-From the release page, download these two files (for example, for v0.1.1):
+From the release page, download these two files (for example, for v0.1.2):
 
-- `LinuxImageWriter-0.1.1-x86_64.AppImage`
-- `LinuxImageWriter-0.1.1-x86_64.AppImage.sha256`
+- `LinuxImageWriter-0.1.2-x86_64.AppImage`
+- `LinuxImageWriter-0.1.2-x86_64.AppImage.sha256`
 
 Check the download in the folder you saved it to:
 
 ```sh
-sha256sum -c LinuxImageWriter-0.1.1-x86_64.AppImage.sha256
+sha256sum -c LinuxImageWriter-0.1.2-x86_64.AppImage.sha256
 ```
 
-It must print `LinuxImageWriter-0.1.1-x86_64.AppImage: OK`. If it does not,
+It must print `LinuxImageWriter-0.1.2-x86_64.AppImage: OK`. If it does not,
 delete the file and download it again.
 
 ## Run
 
 ```sh
-chmod +x LinuxImageWriter-0.1.1-x86_64.AppImage
-./LinuxImageWriter-0.1.1-x86_64.AppImage
+chmod +x LinuxImageWriter-0.1.2-x86_64.AppImage
+./LinuxImageWriter-0.1.2-x86_64.AppImage
 ```
 
 You can also make the file executable in your file manager (Properties →
@@ -49,7 +49,7 @@ The AppImage mounts itself with FUSE. If that fails (for example, in a
 container without `/dev/fuse`), run it with:
 
 ```sh
-./LinuxImageWriter-0.1.1-x86_64.AppImage --appimage-extract-and-run
+./LinuxImageWriter-0.1.2-x86_64.AppImage --appimage-extract-and-run
 ```
 
 This unpacks it to a temporary folder first (about 95 MB, which may be left

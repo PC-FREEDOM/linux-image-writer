@@ -75,6 +75,22 @@
   </screenshots>
 
   <releases>
+    <release version="0.1.2" date="2026-10-05">
+      <description>
+        <p>Safety, progress reporting, and interface improvements for USB image writing.</p>
+        <p xml:lang="ja">USB イメージ書き込み時の安全性、進捗表示、操作画面を改善するアップデートです。</p>
+        <ul>
+          <li>Improves cancellation by safely draining pending writes before closing the target device</li>
+          <li xml:lang="ja">キャンセル時に未完了の書き込みを安全に処理してから USB ドライブを閉じるよう改善しました</li>
+          <li>Limits the write-back backlog to reduce long waits during finalizing and cancellation</li>
+          <li xml:lang="ja">書き込み待ちのデータ量に上限を設け、仕上げやキャンセル時の長い待ち時間を抑えるよう改善しました</li>
+          <li>Adds overall progress based on confirmed write-back and clearer states for writing, finalizing, verification, and cancellation</li>
+          <li xml:lang="ja">確認済みの書き込み量を基準にした全体進捗と、書き込み・仕上げ・検証・キャンセルの分かりやすい状態表示を追加しました</li>
+          <li>Refreshes the operation interface with clearer spacing, progress presentation, and visual hierarchy</li>
+          <li xml:lang="ja">操作画面の余白、進捗表示、情報の強弱を見直し、より分かりやすい表示に改善しました</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-03">
       <description>
         <p>Compatibility and packaging update for Linux Image Writer.</p>

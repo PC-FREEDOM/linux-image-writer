@@ -1,6 +1,6 @@
 [package]
 name = "linux-image-writer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A simple and safety-focused USB image writer for Linux"
 license = "GPL-3.0-or-later"

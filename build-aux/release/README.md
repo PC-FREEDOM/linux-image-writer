@@ -28,8 +28,8 @@ run() {
     -v linux-image-writer-cargo-registry:/opt/cargo/registry \
     linux-image-writer-appimage-build "$@"
 }
-run build-aux/release/release.sh --release 0.1.1 --validate-only   # checks only
-run build-aux/release/release.sh --release 0.1.1                  # official
+run build-aux/release/release.sh --release 0.1.2 --validate-only   # checks only
+run build-aux/release/release.sh --release 0.1.2                  # official
 run build-aux/release/release.sh --test                            # test build
 ```
 
@@ -66,15 +66,15 @@ falls back to the Ubuntu snapshot's time -- for development builds only.
 
 ## Release assets
 
-Upload exactly these six files (for 0.1.1):
+Upload exactly these six files (for 0.1.2):
 
 ```
-LinuxImageWriter-0.1.1-x86_64.AppImage
-LinuxImageWriter-0.1.1-x86_64.AppImage.sha256
-LinuxImageWriter-0.1.1-source.tar.gz
-LinuxImageWriter-0.1.1-source.tar.gz.sha256
-LinuxImageWriter-0.1.1-appimage-sources.tar.zst
-LinuxImageWriter-0.1.1-appimage-sources.tar.zst.sha256
+LinuxImageWriter-0.1.2-x86_64.AppImage
+LinuxImageWriter-0.1.2-x86_64.AppImage.sha256
+LinuxImageWriter-0.1.2-source.tar.gz
+LinuxImageWriter-0.1.2-source.tar.gz.sha256
+LinuxImageWriter-0.1.2-appimage-sources.tar.zst
+LinuxImageWriter-0.1.2-appimage-sources.tar.zst.sha256
 ```
 
 - The application's source archive is attached although GitHub generates

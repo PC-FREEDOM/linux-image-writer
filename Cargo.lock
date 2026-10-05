@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "linux-image-writer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ctrlc",
  "flate2",
